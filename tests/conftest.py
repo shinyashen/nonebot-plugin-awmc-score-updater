@@ -27,3 +27,14 @@ async def after_nonebot_init(after_nonebot_init: None):
 
     # 加载插件（[tool.nonebot]：本插件 require 主插件自动加载）
     nonebot.load_from_toml("pyproject.toml")
+
+
+@pytest.fixture(autouse=True)
+async def _bypass_song_ensure_loaded(monkeypatch):
+    """导分前曲库就绪等待在无预热测试环境下会死等，统一旁路。"""
+    from nonebot_plugin_awmc_helper.core.songs import song_service
+
+    async def fake_ensure():
+        return None
+
+    monkeypatch.setattr(song_service, "ensure_loaded", fake_ensure)

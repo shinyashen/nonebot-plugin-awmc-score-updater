@@ -220,6 +220,13 @@ async def test_simple_update_flow(app: App, stores, monkeypatch):
         return 1.23
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    # ensure_loaded 在无预热环境会死等 _ready：流程编排测试直接旁路
+    from nonebot_plugin_awmc_helper.core.songs import song_service
+
+    async def fake_ensure():
+        return None
+
+    monkeypatch.setattr(song_service, "ensure_loaded", fake_ensure)
     await _bind_token(df="a" * 128, lx="b" * 32)
     await _bind_wechat("888")
 

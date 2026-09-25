@@ -237,6 +237,13 @@ async def _(
     prefix = "推分了？你先别急" if special else "正在上传分数，请稍等..."
     await UniMessage.text(f"{prefix}{hint}").send(at_sender=True)
 
+    # 水鱼/落雪 update_scores 内部会经 maimai-py client.songs() 取曲库：
+    # 必须等主插件曲库预热完成（缓存已填），否则重启后立即导分会触发
+    # 现场全量重建，超过请求超时（2026-09-26 线上 ReadTimeout 实测根因）
+    from nonebot_plugin_awmc_helper.core.songs import song_service
+
+    await song_service.ensure_loaded()
+
     source = [
         (
             SaltArcadeProvider(
