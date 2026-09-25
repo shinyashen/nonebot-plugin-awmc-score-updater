@@ -20,6 +20,7 @@ from nonebot.params import CommandArg
 from maimai_py.models import PlayerIdentifier
 from nonebot.adapters import Bot, Event, Message
 from maimai_py.exceptions import (
+    InvalidJsonError,
     PrivacyLimitationError,
     InvalidPlayerIdentifierError,
 )
@@ -270,6 +271,11 @@ async def _(
         await UniMessage.text(" 你没有同意数据站的相关用户协议，无法完成该操作").finish(
             at_sender=True
         )
+    except InvalidJsonError:
+        # 数据站返回非 JSON（500 HTML 等）：多见于凌晨维护窗口，服务端问题非本插件故障
+        await UniMessage.text(
+            " 数据站服务暂时不可用（可能维护中），成绩可能已部分上传，请稍后再试"
+        ).finish(at_sender=True)
 
     await wechat_store.set_last_update(
         platform, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
