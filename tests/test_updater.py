@@ -339,3 +339,65 @@ async def test_salt_provider_requires_userid():
         await provider.get_scores_all(
             PlayerIdentifier(credentials={"userid": ""}), None
         )  # type: ignore[arg-type]
+
+
+async def test_delta_chain_borrows_better_fc_fs_from_targets(songs):
+    """合并条件对拍（原版语义）：
+
+    机台源达成率更高但无 fc/fs，目标交集基准携带更优 fc/fs（水鱼 FCP+FS、
+    落雪 FC+无FS → 基准 fc 取更优 FCP、fs 任一为 None 则基准 fs=None）。
+    上传载荷应合并基准的更优 fc/fs（跨目标补达成情况）。
+    """
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(
+                song_id=231,
+                achievements=100.0,
+                dx_score=2500,
+                fc=None,
+                fs=None,
+            )
+        ]
+    )
+    water = FakeUpdateProvider(
+        [mk_score(achievements=99.5, dx_score=2000, fc=FCType.FCP, fs=FSType.FS)]
+    )
+    lxns = FakeUpdateProvider(
+        [mk_score(achievements=99.5, dx_score=2000, fc=FCType.FC, fs=None)]
+    )
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [
+        (water, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (lxns, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+
+    await delta_updates_chain(client, src, targets)
+
+    assert len(water.updates) == 1
+    uploaded = water.updates[0][0]
+    assert uploaded.achievements == 100.0  # 源更高 → 上传源值
+    assert uploaded.fc == FCType.FCP  # 两目标均有 fc → 基准取更优 FCP，借给源上传
+    # 原版语义边界：落雪缺 fs → 交集基准 fs=None，水鱼独有的 FS 不跨目标补
+    assert uploaded.fs is None
+
+
+async def test_delta_chain_no_gain_skips_even_with_fc_gap(songs):
+    """原版语义边界：达成率与 DX 均无提升时，即使目标缺更优 fc/fs 也不上传。"""
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [mk_score(achievements=99.5, dx_score=2000, fc=None, fs=None)]
+    )
+    target = FakeUpdateProvider(
+        [mk_score(achievements=99.5, dx_score=2000, fc=FCType.FCP, fs=FSType.FS)]
+    )
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+
+    await delta_updates_chain(client, src, targets)
+
+    assert target.updates[0] == []  # 无提升不传，fc 缺口不触发上传
