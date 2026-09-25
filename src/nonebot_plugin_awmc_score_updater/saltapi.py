@@ -8,6 +8,7 @@ maimai-py 未覆盖的外部接口：机台二维码解析（``/getQRInfo``）�
 """
 
 import re
+import ssl
 from typing import Any
 
 import httpx
@@ -18,14 +19,26 @@ from nonebot_plugin_awmc_helper.core.http import build_smart_transport
 _client: httpx.AsyncClient | None = None
 
 
+def _lenient_verify() -> ssl.SSLContext:
+    """SaltNet 证书现状（2026-09 实测）：主备域名证书均主机名不匹配（签给
+    其他域名），原版 Hoshino 插件因此裸 ``verify=False``。这里保留 CA 链
+    验证、仅放开主机名校验——比原版少暴露一层 MITM 面；上游修证书后可还原。
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    return ctx
+
+
 def get_client() -> httpx.AsyncClient:
     """SaltNet 直连共享客户端（懒创建，代理传输与主插件 ext 层同源）。"""
     global _client
     if _client is None:
+        verify = _lenient_verify()
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
             follow_redirects=True,
-            transport=build_smart_transport(),
+            verify=verify,
+            transport=build_smart_transport(verify=verify),
         )
     return _client
 
