@@ -256,7 +256,7 @@ async def _(
         )
     ]
     try:
-        duration = await run_update(
+        duration, skipped = await run_update(
             client,
             source,
             targets,
@@ -291,6 +291,8 @@ async def _(
             f"上传分数至{target_str}成功！\n本次上传用时{duration:.2f}秒\n"
             f"上传方式：{'全量上传' if qrcode else '简略上传'}"
         )
+    if skipped:
+        msg += f"\n另有 {skipped} 条成绩被数据站拒绝（删除曲/未收录），已跳过"
     if lx_note:
         msg += f"\n{lx_note}"
     await UniMessage.text(f" {msg}").finish(at_sender=True)

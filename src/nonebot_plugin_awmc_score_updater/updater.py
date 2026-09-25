@@ -20,6 +20,7 @@ from maimai_py import MaimaiClient, MaimaiScores
 from nonebot.log import logger
 from maimai_py.enums import FCType, FSType, RateType
 from maimai_py.models import Score, PlayerIdentifier
+from maimai_py.exceptions import InvalidJsonError
 from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
 
 from .saltapi import SaltApiError, deser_score, fetch_score_payload
@@ -55,7 +56,24 @@ class SaltArcadeProvider(IScoreProvider):
         payload = await fetch_score_payload(
             userid, qrcode, main_url=self.main_url, fallback_url=self.fallback_url
         )
-        return [deser_score(music) for music in payload]
+        scores = [deser_score(music) for music in payload]
+        # SaltNet 会保留已删除/下架曲目的残留成绩，水鱼 update_records 收到
+        # 未收录曲目会服务端 500——以主插件曲库 CN 视图为过滤基准剔除
+        # （视图已排除删除曲与禁用曲；handler 前置的 ensure_loaded 保证曲库就绪）
+        from nonebot_plugin_awmc_helper.core.songs import song_service
+
+        kept: list[Score] = []
+        dropped = 0
+        for score in scores:
+            if await song_service.by_id(score.id % 10000) is not None:
+                kept.append(score)
+            else:
+                dropped += 1
+        if dropped:
+            logger.warning(
+                f"SaltNet 成绩含删除曲/未收录曲 {dropped} 条，已按主插件曲库剔除"
+            )
+        return kept
 
 
 def _join_rev(scores: Iterable[Score]) -> Score:
@@ -164,8 +182,10 @@ async def delta_updates_chain(
     source_gather_callback: ChainCallback | None = None,
     target_gather_callback: ChainCallback | None = None,
     target_update_callback: ChainCallback | None = None,
-) -> None:
+) -> int:
     """增量版 ``MaimaiClient.updates_chain``：源成绩与目标已有成绩比较后仅上传增量。
+
+    返回因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数（常规为 0）。
 
     目标 provider 必须同时支持拉取（IScoreProvider）与上传（IScoreUpdateProvider）。
     """
@@ -208,20 +228,49 @@ async def delta_updates_chain(
             delta_scores.append(delta)
     delta_maimai_scores = await MaimaiScores(client).configure(delta_scores)
 
-    tasks = []
-    for tp, ident, kwargs in target:
-        if ident is None:
-            continue
-        if target_mode == "parallel" or (target_mode == "fallback" and len(tasks) == 0):
-            task = asyncio.create_task(client.updates(ident, delta_scores, tp))
-            if target_update_callback is not None:
-                task.add_done_callback(
-                    lambda t, k=kwargs: target_update_callback(
-                        delta_maimai_scores, t.exception(), k
-                    )
+    # 水鱼未收录新曲的成绩会让 update_records 服务端 500（2026-09-26 线上实测：
+    # 空载荷 200、含未收录曲目 id 的载荷 500）。过滤基准 = 目标已有成绩出现过的
+    # 曲目 id（目标确认收录）；500 后自动降级为仅传已收录部分并报告跳过数。
+    known_song_ids = {score.id % 10000 for d in target_dicts for score in d.values()}
+    skipped_unknown = 0
+
+    upload_tasks: list[asyncio.Task] = []
+
+    async def _schedule_upload(batch: list[Score]) -> None:
+        for tp, ident, kwargs in target:
+            if ident is None:
+                continue
+            if target_mode == "parallel" or (
+                target_mode == "fallback" and not upload_tasks
+            ):
+                upload_tasks.append(
+                    asyncio.create_task(client.updates(ident, batch, tp))
                 )
-            tasks.append(task)
-    await asyncio.gather(*tasks, return_exceptions=False)
+                if target_update_callback is not None:
+                    upload_tasks[-1].add_done_callback(
+                        lambda t, k=kwargs: target_update_callback(
+                            delta_maimai_scores, t.exception(), k
+                        )
+                    )
+
+    await _schedule_upload(delta_scores)
+    results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+
+    if any(isinstance(r, InvalidJsonError) for r in results):
+        filtered = [s for s in delta_scores if s.id % 10000 in known_song_ids]
+        skipped_unknown = len(delta_scores) - len(filtered)
+        if filtered and skipped_unknown:
+            logger.warning(
+                f"数据站拒绝上传（含未收录曲目成绩），"
+                f"剔除 {skipped_unknown} 条后重传已收录部分"
+            )
+            upload_tasks.clear()
+            await _schedule_upload(filtered)
+            results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, Exception):
+            raise r
+    return skipped_unknown
 
 
 async def run_update(
@@ -232,11 +281,11 @@ async def run_update(
     full: bool,
     max_retries: int = 3,
     gather_log_name: str = "salt",
-) -> float:
+) -> tuple[float, int]:
     """执行一次传分：全量（updates_chain）或增量（delta_updates_chain）。
 
     失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
-    映射为用户文案。返回本次传分用时（秒）。
+    映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数)。
     """
     if not target:
         raise SaltApiError("没有可用的成绩数据库，请先绑定水鱼或落雪")
@@ -267,6 +316,7 @@ async def run_update(
     start = time.monotonic()
     last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
+        skipped = 0
         try:
             if full:
                 await client.updates_chain(
@@ -278,7 +328,7 @@ async def run_update(
                     update_callback,
                 )
             else:
-                await delta_updates_chain(
+                skipped = await delta_updates_chain(
                     client,
                     source,
                     target,
@@ -288,7 +338,7 @@ async def run_update(
                     gather_callback,
                     update_callback,
                 )
-            return time.monotonic() - start
+            return time.monotonic() - start, skipped
         except Exception as e:  # 统一退避重试后交给调用方
             last_exc = e
             if attempt >= max_retries:

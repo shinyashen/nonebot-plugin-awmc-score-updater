@@ -7,7 +7,9 @@
 插件相关导入一律函数内进行（收集期不触发插件加载链）。
 """
 
+import respx
 import pytest
+from httpx import Response
 from maimai_py.enums import FCType, FSType, SongType, LevelIndex
 from maimai_py.models import Score, PlayerIdentifier
 from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
@@ -248,8 +250,11 @@ async def test_run_update_retries_then_succeeds(songs):
         (FlakyProvider("m", "f"), PlayerIdentifier(credentials="x"), {"name": "s"})
     ]
     targets = [(flaky_target, PlayerIdentifier(credentials="t"), {"name": "t"})]
-    duration = await run_update(client, source, targets, full=False, max_retries=2)
+    duration, skipped = await run_update(
+        client, source, targets, full=False, max_retries=2
+    )
     assert duration >= 0
+    assert skipped == 0
     assert call_count["n"] == 2
 
 
@@ -277,3 +282,60 @@ async def test_run_update_no_targets_raises():
 
     with pytest.raises(SaltApiError):
         await run_update(client, source, [], full=False, max_retries=0)
+
+
+@respx.mock
+async def test_salt_provider_filters_deleted_songs(songs):
+    """SaltNet 源过滤：删除曲/未收录曲（曲库无）在源头剔除。
+
+    用户实测：SaltNet 保留删除曲残留成绩，水鱼 update_records 收到未收录
+    曲目 id 返回 500（2026-09-26）。
+    """
+    import respx
+
+    from nonebot_plugin_awmc_score_updater.updater import SaltArcadeProvider
+
+    detail = {
+        "musicId": 0,
+        "level": 4,
+        "achievement": 1005000,
+        "comboStatus": 0,
+        "syncStatus": 0,
+        "deluxscoreMax": 2000,
+    }
+
+    def rows(ids):
+        out = []
+        for i in ids:
+            d = dict(detail, musicId=i)
+            out.append(d)
+        return out
+
+    respx.post("https://salt_api_main.realtvop.top/updateUser").mock(
+        return_value=Response(
+            200,
+            json={"userMusicList": [{"userMusicDetailList": rows([231, 999999])}]},
+        )
+    )
+    provider = SaltArcadeProvider("https://salt_api_main.realtvop.top", "fallback")
+    got = await provider.get_scores_all(
+        SaltArcadeProvider.make_identifier("42"),
+        None,  # type: ignore[arg-type]——曲库过滤走主插件 song_service，client 未用
+    )
+    assert [s.id for s in got] == [
+        231
+    ]  # 999999 曲库无（999999 % 10000 = 9999 不存在）→ 剔除
+
+
+async def test_salt_provider_requires_userid():
+    import pytest
+    from maimai_py.models import PlayerIdentifier
+
+    from nonebot_plugin_awmc_score_updater.saltapi import SaltApiError
+    from nonebot_plugin_awmc_score_updater.updater import SaltArcadeProvider
+
+    provider = SaltArcadeProvider("m", "f")
+    with pytest.raises(SaltApiError):
+        await provider.get_scores_all(
+            PlayerIdentifier(credentials={"userid": ""}), None
+        )  # type: ignore[arg-type]

@@ -31,10 +31,21 @@ async def after_nonebot_init(after_nonebot_init: None):
 
 @pytest.fixture(autouse=True)
 async def _bypass_song_ensure_loaded(monkeypatch):
-    """导分前曲库就绪等待在无预热测试环境下会死等，统一旁路。"""
+    """曲库就绪等待的测试替身：无预热环境会死等 _ready。
+
+    已注入曲库（seed_service）的用例：等待立即放行并返回真曲库（过滤
+    逻辑仍走真实数据）；未注入的用例 1 秒超时后返回 None 放行。
+    """
+    import asyncio
+
     from nonebot_plugin_awmc_helper.core.songs import song_service
+    from nonebot_plugin_awmc_helper.core.client import client
 
     async def fake_ensure():
-        return None
+        try:
+            await asyncio.wait_for(song_service._ready.wait(), timeout=1)
+        except asyncio.TimeoutError:
+            return None
+        return await client.songs()
 
     monkeypatch.setattr(song_service, "ensure_loaded", fake_ensure)

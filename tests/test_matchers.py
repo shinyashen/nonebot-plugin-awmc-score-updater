@@ -217,7 +217,7 @@ async def test_simple_update_flow(app: App, stores, monkeypatch):
     async def fake_run_update(client, source, target, *, full, max_retries):
         assert full is False
         assert len(target) == 2  # 水鱼 + 落雪
-        return 1.23
+        return 1.23, 0
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     # ensure_loaded 在无预热环境会死等 _ready：流程编排测试直接旁路
@@ -339,7 +339,7 @@ async def test_lxns_readonly_jwt_with_df_still_exports(app: App, stores, monkeyp
     async def fake_run_update(client, source, target, *, full, max_retries):
         assert len(target) == 1  # 仅水鱼
         assert target[0][2]["name"] == "水鱼"
-        return 0.5
+        return 0.5, 0
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     await _bind_token(df="a" * 128)
@@ -389,7 +389,7 @@ async def test_lxns_writable_jwt_exports(app: App, stores, monkeypatch):
     async def fake_run_update(client, source, target, *, full, max_retries):
         assert len(target) == 2  # 水鱼 + 落雪
         assert target[1][2]["name"] == "落雪"
-        return 0.8
+        return 0.8, 0
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     await _bind_token(df="a" * 128)
