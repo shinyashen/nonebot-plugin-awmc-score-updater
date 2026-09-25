@@ -46,9 +46,12 @@ HELP_TEXT = """上传国服 maimaiDX 成绩至水鱼/落雪成绩数据库。
 2. 导/传分/上传分数 [二维码内容]：上传成绩至已绑定的水鱼/落雪
 3. 不带二维码 = 简略上传（仅达成率与 DX 分）；带二维码 = 全量上传（仅私聊或白名单群）
 
-水鱼/落雪 token 请使用 awmc-helper 主插件绑定：
-· 绑定水鱼token <水鱼成绩导入token>
-· 绑定落雪（OAuth 授权绑定）"""
+导分依赖主插件 awmc-helper 的绑定，请先在主插件完成（发给 bot 即可）：
+· 绑定水鱼token <Import-Token> —— 绑定后才能导分水鱼。
+  获取方式：水鱼查分器个人页 → 设置 → 生成 Import-Token。
+  注意：仅「绑定水鱼 <用户名>」的公开查询档无法导分，必须绑定 Import-Token。
+· 绑定落雪 —— 按 bot 回复的授权链接完成落雪授权，再把授权码直接回复给 bot。
+  新版授权自带成绩上传权限；旧版授权会在导分时提示重新绑定"""
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
 help_cmd = on_command("导帮助", aliases={"传分帮助", "上传分数帮助"}, block=True)
