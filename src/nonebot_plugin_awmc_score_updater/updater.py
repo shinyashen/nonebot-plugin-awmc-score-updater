@@ -1,0 +1,301 @@
+"""传分核心：SaltNet 微信成绩 → 水鱼/落雪。
+
+- :class:`SaltArcadeProvider`：maimai-py ``IScoreProvider`` 的 SaltNet 适配，
+  供 updates 链作 source；
+- :func:`delta_updates_chain`：增量上传——与目标已有成绩比较，只上传有提升
+  或新增的部分（移植自 HoshinoBot 版 maimai-score-updater 的同名扩展方法）；
+- :func:`run_update`：主流程编排（指数退避重试 + 计时），全量/增量二态。
+
+目标端复用主插件 core.client 的唯一 ``MaimaiClient`` 单例；水鱼/落雪凭据
+直接使用主插件 ``user_binding`` 的导入 token，本插件不存储、不重复绑定。
+"""
+
+import time
+import asyncio
+import hashlib
+from typing import Any
+from collections.abc import Callable, Iterable
+
+from maimai_py import MaimaiClient, MaimaiScores
+from nonebot.log import logger
+from maimai_py.enums import FCType, FSType, RateType
+from maimai_py.models import Score, PlayerIdentifier
+from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
+
+from .saltapi import SaltApiError, deser_score, fetch_score_payload
+
+ChainCallback = Callable[[MaimaiScores, BaseException | None, dict[str, Any]], None]
+
+
+class SaltArcadeProvider(IScoreProvider):
+    """SaltNet 微信成绩源：经 Realtvop 代理拉取华立微信端成绩明细。"""
+
+    def __init__(self, main_url: str, fallback_url: str) -> None:
+        self.main_url = main_url
+        self.fallback_url = fallback_url
+
+    def _hash(self) -> str:
+        return hashlib.md5(b"salt_arcade").hexdigest()
+
+    @staticmethod
+    def make_identifier(userid: str, qrcode: str | None = None) -> PlayerIdentifier:
+        """构造 SaltNet 源标识（credentials 为 dict：userid 必带，qrcode 全量时带）。"""
+        return PlayerIdentifier(credentials={"userid": userid, "qrcode": qrcode or ""})
+
+    async def get_scores_all(
+        self, identifier: PlayerIdentifier, client: MaimaiClient
+    ) -> list[Score]:
+        assert isinstance(identifier.credentials, dict), (
+            "SaltNet 源标识的 credentials 应为 dict"
+        )
+        userid = identifier.credentials.get("userid") or ""
+        qrcode = identifier.credentials.get("qrcode") or None
+        if not userid:
+            raise SaltApiError("未绑定微信二维码，无法拉取机台成绩")
+        payload = await fetch_score_payload(
+            userid, qrcode, main_url=self.main_url, fallback_url=self.fallback_url
+        )
+        return [deser_score(music) for music in payload]
+
+
+def _join_rev(scores: Iterable[Score]) -> Score:
+    """目标多源成绩合并（仅在「各源都有该成绩」的交集上调用）：
+
+    达成率/DX 分取各源最小值作为比较基准（保守：宁可多传不可漏传），
+    其余字段取各源最高记录。
+    """
+    scores_list = list(scores)
+    if not scores_list:
+        raise ValueError("至少需要一个 Score")
+    res = scores_list[0]
+    res.achievements = min(s.achievements or 0 for s in scores_list)
+    res.dx_score = min(s.dx_score or 0 for s in scores_list)
+    res.fc = (
+        FCType(min(s.fc.value for s in scores_list))
+        if all(s.fc is not None for s in scores_list)
+        else None
+    )
+    res.fs = (
+        FSType(max(s.fs.value for s in scores_list))
+        if all(s.fs is not None for s in scores_list)
+        else None
+    )
+    res.rate = RateType._from_achievement(res.achievements)
+    res.play_count = min(s.play_count or 0 for s in scores_list)
+    return res
+
+
+def _compare(score: Score, other: Score | None) -> Score | None:
+    """增量判定：与目标已有成绩比较，无提升返回 None，有提升返回合并后的成绩。"""
+    if other is not None:
+        if score.level_index != other.level_index or score.type != other.type:
+            raise ValueError(
+                "Cannot compare scores with different level indexes or types"
+            )
+        if (
+            score.achievements <= other.achievements
+            and score.dx_score <= other.dx_score
+        ):
+            return None
+        score.achievements = max(score.achievements or 0, other.achievements or 0)
+        score.dx_score = max(score.dx_score or 0, other.dx_score or 0)
+        if score.fc != other.fc:
+            self_fc = score.fc.value if score.fc is not None else 100
+            other_fc = other.fc.value if other.fc is not None else 100
+            selected_value = min(self_fc, other_fc)
+            score.fc = FCType(selected_value) if selected_value != 100 else None
+        if score.fs != other.fs:
+            self_fs = score.fs.value if score.fs is not None else -1
+            other_fs = other.fs.value if other.fs is not None else -1
+            selected_value = max(self_fs, other_fs)
+            score.fs = FSType(selected_value) if selected_value != -1 else None
+        if score.rate != other.rate:
+            # 评级取更优；外源成绩 rate 可能为空，缺省侧直接沿用另一侧
+            if score.rate is not None and other.rate is not None:
+                score.rate = RateType(min(score.rate.value, other.rate.value))
+            elif score.rate is None:
+                score.rate = other.rate
+        if score.play_count != other.play_count:
+            score.play_count = max(score.play_count or 0, other.play_count or 0)
+    return score
+
+
+async def _empty_scores(client: MaimaiClient) -> MaimaiScores:
+    return await MaimaiScores(client).configure([])
+
+
+async def _gather(
+    client: MaimaiClient,
+    providers: list[tuple[Any, PlayerIdentifier | None, dict[str, Any]]],
+    callback: ChainCallback | None,
+    mode: str,
+) -> list[MaimaiScores]:
+    """并行拉取一组 source/target 的成绩，收集成功结果，失败走 callback。
+
+    单个提供器失败不会中断整批（callback 通知后以空成绩占位），但整体
+    gather 遇到异常仍会向上传播——由 run_update 的重试循环兜底。
+    """
+    empty_scores = await _empty_scores(client)
+    tasks = []
+    for sp, ident, kwargs in providers:
+        if ident is None:
+            continue
+        if mode == "parallel" or (mode == "fallback" and len(tasks) == 0):
+            task = asyncio.create_task(client.scores(ident, sp))
+            if callback is not None:
+                task.add_done_callback(
+                    lambda t, k=kwargs: callback(
+                        t.result() if not t.exception() else empty_scores,
+                        t.exception(),
+                        k,
+                    )
+                )
+            tasks.append(task)
+    results = await asyncio.gather(*tasks)
+    return [r for r in results if isinstance(r, MaimaiScores)]
+
+
+async def delta_updates_chain(
+    client: MaimaiClient,
+    source: list[tuple[IScoreProvider, PlayerIdentifier | None, dict[str, Any]]],
+    target: list[tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]],
+    source_mode: str = "fallback",
+    target_mode: str = "parallel",
+    source_gather_callback: ChainCallback | None = None,
+    target_gather_callback: ChainCallback | None = None,
+    target_update_callback: ChainCallback | None = None,
+) -> None:
+    """增量版 ``MaimaiClient.updates_chain``：源成绩与目标已有成绩比较后仅上传增量。
+
+    目标 provider 必须同时支持拉取（IScoreProvider）与上传（IScoreUpdateProvider）。
+    """
+    for tp, _, _ in target:
+        if not isinstance(tp, IScoreProvider):
+            raise ValueError("Target provider does not support score fetching.")
+        if not isinstance(tp, IScoreUpdateProvider):
+            raise ValueError("Target provider does not support score updating.")
+
+    # 源成绩拉取并合并（_join：同谱面取最高记录）
+    source_scores_list = await _gather(
+        client, source, source_gather_callback, source_mode
+    )
+    source_scores_unique: dict[str, Score] = {}
+    for maimai_scores in source_scores_list:
+        for score in maimai_scores.scores:
+            key = f"{score.id} {score.type} {score.level_index}"
+            source_scores_unique[key] = score._join(source_scores_unique.get(key, None))
+
+    # 目标成绩拉取并取交集合并（_join_rev：保守基准）
+    target_scores_list = await _gather(
+        client, target, target_gather_callback, target_mode
+    )
+    target_dicts = [
+        {f"{score.id} {score.type} {score.level_index}": score for score in ms.scores}
+        for ms in target_scores_list
+    ]
+    if target_dicts:
+        common_keys = set(target_dicts[0].keys())
+        for d in target_dicts[1:]:
+            common_keys.intersection_update(d.keys())
+        merged_targets = {k: _join_rev(d[k] for d in target_dicts) for k in common_keys}
+    else:
+        merged_targets = {}
+
+    # 增量判定并上传
+    delta_scores: list[Score] = []
+    for key, score in source_scores_unique.items():
+        if delta := _compare(score, merged_targets.get(key, None)):
+            delta_scores.append(delta)
+    delta_maimai_scores = await MaimaiScores(client).configure(delta_scores)
+
+    tasks = []
+    for tp, ident, kwargs in target:
+        if ident is None:
+            continue
+        if target_mode == "parallel" or (target_mode == "fallback" and len(tasks) == 0):
+            task = asyncio.create_task(client.updates(ident, delta_scores, tp))
+            if target_update_callback is not None:
+                task.add_done_callback(
+                    lambda t, k=kwargs: target_update_callback(
+                        delta_maimai_scores, t.exception(), k
+                    )
+                )
+            tasks.append(task)
+    await asyncio.gather(*tasks, return_exceptions=False)
+
+
+async def run_update(
+    client: MaimaiClient,
+    source: list[tuple[IScoreProvider, PlayerIdentifier, dict[str, Any]]],
+    target: list[tuple[IScoreUpdateProvider, PlayerIdentifier, dict[str, Any]]],
+    *,
+    full: bool,
+    max_retries: int = 3,
+    gather_log_name: str = "salt",
+) -> float:
+    """执行一次传分：全量（updates_chain）或增量（delta_updates_chain）。
+
+    失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
+    映射为用户文案。返回本次传分用时（秒）。
+    """
+    if not target:
+        raise SaltApiError("没有可用的成绩数据库，请先绑定水鱼或落雪")
+
+    def gather_callback(
+        scores: MaimaiScores, err: BaseException | None, ctx: dict[str, Any]
+    ) -> None:
+        if err:
+            logger.error(
+                f"从{ctx.get('name', gather_log_name)}源获取数据失败:\n{err!r}"
+            )
+        else:
+            logger.info(
+                f"从{ctx.get('name', gather_log_name)}源获取数据成功，"
+                f"共 {len(scores.scores)} 条成绩"
+            )
+
+    def update_callback(
+        scores: MaimaiScores, err: BaseException | None, ctx: dict[str, Any]
+    ) -> None:
+        if err:
+            logger.error(f"更新到目标{ctx.get('name', '?')}失败:\n{err!r}")
+        else:
+            logger.info(
+                f"更新到目标{ctx.get('name', '?')}成功，共 {len(scores.scores)} 条成绩"
+            )
+
+    start = time.monotonic()
+    last_exc: BaseException | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            if full:
+                await client.updates_chain(
+                    source,
+                    target,
+                    "parallel",
+                    "parallel",
+                    gather_callback,
+                    update_callback,
+                )
+            else:
+                await delta_updates_chain(
+                    client,
+                    source,
+                    target,
+                    "parallel",
+                    "parallel",
+                    gather_callback,
+                    gather_callback,
+                    update_callback,
+                )
+            return time.monotonic() - start
+        except Exception as e:  # 统一退避重试后交给调用方
+            last_exc = e
+            if attempt >= max_retries:
+                raise
+            delay = 0.5 * (2**attempt)
+            logger.warning(
+                f"传分第 {attempt + 1}/{max_retries} 次重试（等待 {delay}s）：{e!r}"
+            )
+            await asyncio.sleep(delay)
+    raise last_exc  # pragma: no cover——循环内必然 return 或 raise
