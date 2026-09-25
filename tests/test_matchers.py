@@ -285,3 +285,154 @@ async def test_simple_update_flow_missing_wechat(app: App, stores):
         "没绑微信二维码你怎么导。。。私聊对我说：绑定微信 <二维码内容>",
         private=True,
     )
+
+
+def _make_jwt(scope: str) -> str:
+    import json
+    import base64
+
+    def b64(s: str) -> str:
+        return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+
+    return f"{b64('{}')}.{b64(json.dumps({'scope': scope}))}.{b64('sig')}"
+
+
+async def _bind_lx_token(token: str) -> None:
+    from sqlmodel import select
+    from sqlmodel.ext.asyncio.session import AsyncSession
+    from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
+
+    async with AsyncSession(get_engine()) as session:
+        stmt = select(UserBinding).where(
+            UserBinding.platform == "OneBot V11", UserBinding.user_id == "12345678"
+        )
+        if row := (await session.exec(stmt)).first():
+            row.lxns_token = token
+        else:
+            session.add(
+                UserBinding(platform="OneBot V11", user_id="12345678", lxns_token=token)
+            )
+        await session.commit()
+
+
+async def test_lxns_readonly_jwt_only_rejected(app: App, stores):
+    """只有旧版授权（JWT 无 write_player）→ 引导重绑，不导任何目标。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    await _bind_lx_token(_make_jwt("read_player read_user_profile"))
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    await _send(
+        app,
+        matchers.update_cmd,
+        event,
+        "检测到你的落雪授权不含成绩写入权限，本次未导出落雪；"
+        "请重新「绑定落雪」完成授权后即可导分",
+        private=True,
+    )
+
+
+@respx.mock
+async def test_lxns_readonly_jwt_with_df_still_exports(app: App, stores, monkeypatch):
+    """旧版授权 + 水鱼 → 水鱼照常导出，成功文案附落雪重绑提示。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async def fake_run_update(client, source, target, *, full, max_retries):
+        assert len(target) == 1  # 仅水鱼
+        assert target[0][2]["name"] == "水鱼"
+        return 0.5
+
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    await _bind_token(df="a" * 128)
+    await _bind_lx_token(_make_jwt("read_player"))
+    await _bind_wechat("888")
+    respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(200, json={"userMusicList": []})
+    )
+
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "导到水鱼了喵！\n你这次导了0.50秒，很厉害了喵~\n怎么导的：简单的导\n"
+                        "检测到你的落雪授权不含成绩写入权限，本次未导出落雪；"
+                        "请重新「绑定落雪」完成授权后即可导分"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+
+
+@respx.mock
+async def test_lxns_writable_jwt_exports(app: App, stores, monkeypatch):
+    """新授权 JWT（scope 含 write_player）→ 正常导落雪。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async def fake_run_update(client, source, target, *, full, max_retries):
+        assert len(target) == 2  # 水鱼 + 落雪
+        assert target[1][2]["name"] == "落雪"
+        return 0.8
+
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    await _bind_token(df="a" * 128)
+    await _bind_lx_token(_make_jwt("read_player read_user_profile write_player"))
+    await _bind_wechat("888")
+    respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(200, json={"userMusicList": []})
+    )
+
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "导到水鱼和落雪了喵！\n你这次导了0.80秒，很厉害了喵~\n怎么导的：简单的导"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+
+
+def test_lxns_writable_non_jwt():
+    from nonebot_plugin_awmc_score_updater.matchers import _lxns_writable
+
+    assert _lxns_writable("b" * 32)  # 个人 API 密钥（非 JWT）恒可写
+    assert _lxns_writable("not-a-jwt!!")

@@ -8,6 +8,9 @@
 去主插件指令。
 """
 
+import re
+import json
+import base64
 from typing import Any
 from datetime import datetime
 
@@ -52,8 +55,48 @@ help_cmd = on_command("导帮助", aliases={"传分帮助", "上传分数帮助"
 bindwx_cmd = on_command("绑定微信", aliases={"bindwx", "微信绑定"}, block=True)
 
 
-def _build_targets(import_token: str | None, lxns_token: str | None):
-    """按主插件绑定装配上传目标（水鱼 Import-Token / 落雪个人 token）。"""
+_LXNS_JWT_RE = re.compile(r"^[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+$")
+"""与 maimai-py is_jwt 同源：落雪 OAuth access_token（JWT）形态。
+
+注意不能以「是否 JWT」判断可写性——重绑后的新授权 token 同样是 JWT，
+需解码 payload 的 scope 声明确认（access_token 仅 15 分钟有效，主插件
+靠 refresh_token 自动续期，续期签发的 scope 随应用当前权限）。
+"""
+
+_LXNS_WRITE_SCOPE = "write_player"
+_LXNS_REBIND_HINT = (
+    "检测到你的落雪授权不含成绩写入权限，本次未导出落雪；"
+    "请重新「绑定落雪」完成授权后即可导分"
+)
+
+
+def _lxns_writable(token: str) -> bool:
+    """落雪凭据是否可写成绩。
+
+    个人 API 密钥（非 JWT）恒可写；JWT 解码 payload 的 scope 判断是否含
+    ``write_player``；解码失败按可写处理（交由运行时 401 文案兜底）。
+    """
+    if not _LXNS_JWT_RE.match(token):
+        return True
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return True
+    return _LXNS_WRITE_SCOPE in str(claims.get("scope", ""))
+
+
+def _build_targets(
+    import_token: str | None, lxns_token: str | None
+) -> tuple[
+    list[tuple[IScoreUpdateProvider, PlayerIdentifier, dict[str, Any]]], str | None
+]:
+    """按主插件绑定装配上传目标。
+
+    返回 (targets, 落雪不可导提示)：落雪 token 缺 ``write_player`` scope
+    （旧版授权，只读）时跳过落雪目标并给出重绑提示，不影响水鱼导出。
+    """
     targets: list[tuple[IScoreUpdateProvider, PlayerIdentifier, dict[str, Any]]] = []
     if import_token:
         targets.append(
@@ -63,11 +106,19 @@ def _build_targets(import_token: str | None, lxns_token: str | None):
                 {"name": "水鱼"},
             )
         )
+    lx_note: str | None = None
     if lxns_token:
-        targets.append(
-            (lxns_provider, PlayerIdentifier(credentials=lxns_token), {"name": "落雪"})
-        )
-    return targets
+        if _lxns_writable(lxns_token):
+            targets.append(
+                (
+                    lxns_provider,
+                    PlayerIdentifier(credentials=lxns_token),
+                    {"name": "落雪"},
+                )
+            )
+        else:
+            lx_note = _LXNS_REBIND_HINT
+    return targets, lx_note
 
 
 async def _resolve_qrcode(text: str) -> tuple[str, str]:
@@ -119,6 +170,12 @@ async def _(
             else "尚未绑定水鱼或落雪 token，请先使用 awmc-helper 主插件绑定"
         )
         await UniMessage.text(f" {msg}").finish(at_sender=True)
+    targets, lx_note = _build_targets(
+        binding.divingfish_import_token, binding.lxns_token
+    )
+    if not targets and lx_note:
+        # 只有落雪绑定且为只读旧授权：无目标可导，直接引导重绑
+        await UniMessage.text(f" {lx_note}").finish(at_sender=True)
 
     wb = await wechat_store.get(platform, user_id)
     if wb is None or not wb.arcade_user_id:
@@ -152,7 +209,6 @@ async def _(
     prefix = "推分了？你先别急" if special else "正在上传分数，请稍等..."
     await UniMessage.text(f"{prefix}{hint}").send(at_sender=True)
 
-    targets = _build_targets(binding.divingfish_import_token, binding.lxns_token)
     source = [
         (
             SaltArcadeProvider(
@@ -194,6 +250,8 @@ async def _(
             f"上传分数至{target_str}成功！\n本次上传用时{duration:.2f}秒\n"
             f"上传方式：{'全量上传' if qrcode else '简略上传'}"
         )
+    if lx_note:
+        msg += f"\n{lx_note}"
     await UniMessage.text(f" {msg}").finish(at_sender=True)
 
 
