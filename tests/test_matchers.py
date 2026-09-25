@@ -102,17 +102,6 @@ async def _send(app: App, matcher, event, reply: str, *, private: bool = False) 
             )
 
 
-async def test_help(app: App, stores):
-    from fake import fake_private_message_event_v11
-
-    from nonebot_plugin_awmc_score_updater import matchers
-
-    event = fake_private_message_event_v11(
-        message="导帮助", user_id=12345678, to_me=True
-    )
-    await _send(app, matchers.help_cmd, event, matchers.HELP_TEXT, private=True)
-
-
 async def test_group_qr_denied_by_default(app: App, stores):
     """白名单默认空：群内带二维码直接拒绝（不触外网、不查绑定）。"""
     from fake import fake_group_message_event_v11

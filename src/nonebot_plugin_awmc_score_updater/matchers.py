@@ -12,12 +12,13 @@ import re
 import json
 import base64
 from typing import Any
+from pathlib import Path
 from datetime import datetime
 
 from nonebot import on_command
 from nonebot.params import CommandArg
 from maimai_py.models import PlayerIdentifier
-from nonebot.adapters import Event, Message
+from nonebot.adapters import Bot, Event, Message
 from maimai_py.exceptions import (
     PrivacyLimitationError,
     InvalidPlayerIdentifierError,
@@ -32,26 +33,50 @@ from nonebot_plugin_awmc_helper.core.client import (
     divingfish_provider,
 )
 from nonebot_plugin_awmc_helper.core.binding import session_keys, binding_service
+from nonebot_plugin_awmc_helper.core.forward import try_send_forward
+from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to_bytes
 
 from .store import wechat_store
 from .config import plugin_config
 from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
 from .updater import SaltArcadeProvider, run_update
 
-HELP_TEXT = """上传国服 maimaiDX 成绩至水鱼/落雪成绩数据库。
+# 合并转发节点与降级图片的文字内容（同源）；水鱼节点附 Import-Token 获取
+# 位置的引导截图（assets/import_token.jpg，沿用 Hoshino 原版素材）
+HELP_SECTIONS = [
+    "上传国服 maimaiDX 成绩至水鱼/落雪成绩数据库。\n\n"
+    "指令：导/传分/上传分数/wmupdate [二维码内容]\n"
+    "· 不带二维码 = 简略上传（仅达成率与 DX 分的增量）\n"
+    "· 带二维码 = 全量上传（仅私聊或白名单群）\n"
+    "· 「导」字开头的指令有专属回复喵",
+    "绑定机台账号（仅私聊）：\n"
+    "绑定微信/bindwx <SGWCMAID.../https...>\n"
+    "发送二维码识别后的内容（SGWCMAID 开头），或二维码页面的链接",
+    "导分依赖主插件 awmc-helper 的绑定，请先在主插件完成（发给 bot 即可）：\n"
+    "绑定水鱼token <Import-Token> —— 绑定后才能导分水鱼。\n"
+    "获取方式见下图：水鱼查分器个人页 → 设置 → 生成 Import-Token。\n"
+    "注意：仅「绑定水鱼 <用户名>」的公开查询档无法导分，必须绑定 Import-Token",
+    "绑定落雪：在主插件发送「绑定落雪」，按回复的授权链接完成落雪授权，"
+    "再把授权码直接回复给 bot（无需任何前缀，90 秒内有效）。\n"
+    "新版授权自带成绩上传权限；旧版授权会在导分时提示重新绑定",
+]
 
-指令列表：
-1. 绑定微信/bindwx <SGWCMAID.../https...>：绑定微信公众号二维码（仅私聊）
-   可发送二维码识别后的内容，或二维码页面的链接
-2. 导/传分/上传分数 [二维码内容]：上传成绩至已绑定的水鱼/落雪
-3. 不带二维码 = 简略上传（仅达成率与 DX 分）；带二维码 = 全量上传（仅私聊或白名单群）
+HELP_TEXT = "\n\n".join(HELP_SECTIONS)
 
-导分依赖主插件 awmc-helper 的绑定，请先在主插件完成（发给 bot 即可）：
-· 绑定水鱼token <Import-Token> —— 绑定后才能导分水鱼。
-  获取方式：水鱼查分器个人页 → 设置 → 生成 Import-Token。
-  注意：仅「绑定水鱼 <用户名>」的公开查询档无法导分，必须绑定 Import-Token。
-· 绑定落雪 —— 按 bot 回复的授权链接完成落雪授权，再把授权码直接回复给 bot。
-  新版授权自带成绩上传权限；旧版授权会在导分时提示重新绑定"""
+_IMPORT_TOKEN_IMG = Path(__file__).parent / "assets" / "import_token.jpg"
+
+
+def _help_entries() -> list["str | UniMessage"]:
+    """合并转发节点：水鱼节点附 Import-Token 引导截图。"""
+    entries: list[str | UniMessage] = list(HELP_SECTIONS[:2])
+    entries.append(
+        UniMessage.text(HELP_SECTIONS[2]).append(
+            UniMessage.image(path=_IMPORT_TOKEN_IMG)
+        )
+    )
+    entries.append(HELP_SECTIONS[3])
+    return entries
+
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
 help_cmd = on_command("导帮助", aliases={"传分帮助", "上传分数帮助"}, block=True)
@@ -259,8 +284,17 @@ async def _(
 
 
 @help_cmd.handle()
-async def _():
-    await UniMessage.text(HELP_TEXT).finish(at_sender=True)
+@handle_errors()
+async def _(bot: Bot, session: Session = UniSession()):
+    # OneBot v11 合并转发（对齐原版帮助形态，水鱼节点附引导图）；失败或
+    # 其他适配器降级为文字渲染图片 + 引导图（纯文本字数过多）
+    group_id = str(session.scene.id) if session.scene.type == SceneType.GROUP else None
+    user_id = None if group_id else str(session.user.id)
+    if await try_send_forward(bot, _help_entries(), group_id=group_id, user_id=user_id):
+        return
+    guide = UniMessage.image(raw=image_to_bytes(text_to_image(HELP_TEXT)))
+    guide += UniMessage.image(path=_IMPORT_TOKEN_IMG)
+    await guide.finish(at_sender=True)
 
 
 @bindwx_cmd.handle()
