@@ -28,8 +28,6 @@ from maimai_py.exceptions import (
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from nonebot_plugin_alconna.uniseg import UniMessage
-from nonebot_plugin_awmc_helper.core.ext import lxns as lxns_ext
-from nonebot_plugin_awmc_helper.core.store import save_binding
 from nonebot_plugin_awmc_helper.core.utils import handle_errors
 from nonebot_plugin_awmc_helper.core.client import (
     client,
@@ -192,21 +190,10 @@ async def _run_with_refresh(
         )
         return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
     except InvalidPlayerIdentifierError as exc:
-        pass
-    if not binding.lxns_token or not binding.lxns_refresh_token:
-        raise exc
-    if not lxns_ext.oauth_configured():
-        raise exc
-    try:
-        token = await lxns_ext.refresh_token(binding.lxns_refresh_token)
-    except Exception:
-        raise exc from None
-    binding.lxns_token = token.access_token
-    if token.refresh_token:
-        binding.lxns_refresh_token = token.refresh_token
-    if token.friend_code:
-        binding.lxns_friend_code = token.friend_code
-    await save_binding(binding)
+        # 落雪 access_token 仅 15 分钟有效：复用主插件自动续期
+        # （refresh_token 换新并落库），成功后以新凭据重试一次
+        if not await binding_service.refresh_lxns_if_expired(binding, exc):
+            raise
     logger.info("落雪 access_token 已续期，重试传分")
     targets, lx_note = _build_targets(
         binding.divingfish_import_token, binding.lxns_token

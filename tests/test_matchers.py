@@ -432,3 +432,80 @@ def test_lxns_writable_non_jwt():
 
     assert _lxns_writable("b" * 32)  # 个人 API 密钥（非 JWT）恒可写
     assert _lxns_writable("not-a-jwt!!")
+
+
+async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
+    """落雪 access_token 过期（401）→ 主插件自动续期 → 新凭据重试成功。"""
+    from fake import fake_private_message_event_v11
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+    from nonebot_plugin_awmc_helper.config import plugin_config
+    from nonebot_plugin_awmc_helper.core.binding import binding_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    monkeypatch.setattr(plugin_config, "awmc_lxns_client_id", "cid")
+    monkeypatch.setattr(plugin_config, "awmc_lxns_client_secret", "sec")
+    monkeypatch.setattr(plugin_config, "awmc_lxns_redirect_uri", "oob")
+    await _bind_token(df="a" * 128)
+    await _bind_lx_token("expired-token")
+    # 补 refresh_token（直绑路径没有，OAuth 绑定才有）
+    from sqlmodel import select
+    from sqlmodel.ext.asyncio.session import AsyncSession
+    from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
+
+    async with AsyncSession(get_engine()) as session:
+        stmt = select(UserBinding).where(
+            UserBinding.platform == "OneBot V11", UserBinding.user_id == "12345678"
+        )
+        row = (await session.exec(stmt)).one()
+        row.lxns_refresh_token = "rt-1"
+        await session.commit()
+
+    refresh_calls = []
+
+    async def fake_refresh(binding, exc):
+        refresh_calls.append(exc)
+        binding.lxns_token = "new-token"
+        return True
+
+    monkeypatch.setattr(binding_service, "refresh_lxns_if_expired", fake_refresh)
+
+    calls = []
+
+    async def fake_run_update(client, source, target, *, full, max_retries):
+        calls.append([kw["name"] for _, _, kw in target])
+        if len(calls) == 1:
+            raise InvalidPlayerIdentifierError("Unauthorized")
+        return 1.0, 0
+
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    await _bind_wechat("888")
+
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "导到水鱼和落雪了喵！\n你这次导了1.00秒，很厉害了喵~\n怎么导的：简单的导"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+    assert len(refresh_calls) == 1
+    assert calls == [["水鱼", "落雪"], ["水鱼", "落雪"]]
