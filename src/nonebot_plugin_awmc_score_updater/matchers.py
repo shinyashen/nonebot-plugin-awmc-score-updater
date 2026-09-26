@@ -68,14 +68,19 @@ HELP_TEXT = "\n\n".join(HELP_SECTIONS)
 _IMPORT_TOKEN_IMG = Path(__file__).parent / "assets" / "import_token.jpg"
 
 
-def _help_entries() -> list[str]:
-    """合并转发节点（纯文本）。
+def _help_entries() -> list["str | UniMessage"]:
+    """合并转发节点：引导图为独立纯图节点（不与文字混节点）。
 
-    引导图不进转发：转发卡片内的图片段不做富媒体上传，NTQQ 渲染为
-    「该消息类型暂不支持查看」（线上实测，raw 字节与路径两种形式皆然）
-    ——引导图由 handler 在转发成功后单独以普通图片消息发送。
-    """
-    return list(HELP_SECTIONS)
+    节点构造已对齐 Hoshino 原版实测可用形态（name/uin 键 + file:/// 图片
+    URI，见主插件 core.forward 升级记录）；此前「消息类型暂不支持查看」
+    实为图文混合单节点 + 图片路径形式不规范所致。"""
+    return [
+        HELP_SECTIONS[0],
+        HELP_SECTIONS[1],
+        HELP_SECTIONS[2],
+        UniMessage.image(path=_IMPORT_TOKEN_IMG),
+        HELP_SECTIONS[3],
+    ]
 
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
@@ -340,7 +345,6 @@ async def _(bot: Bot, session: Session = UniSession()):
     group_id = str(session.scene.id) if session.scene.type == SceneType.GROUP else None
     user_id = None if group_id else str(session.user.id)
     if await try_send_forward(bot, _help_entries(), group_id=group_id, user_id=user_id):
-        await UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes()).send()
         return
     guide = UniMessage.image(raw=image_to_bytes(text_to_image(HELP_TEXT)))
     guide += UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes())

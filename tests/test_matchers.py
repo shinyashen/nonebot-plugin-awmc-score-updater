@@ -533,32 +533,22 @@ async def test_help_forward_then_guide_image(app: App, stores, monkeypatch):
     )
     async with app.test_matcher(matchers.help_cmd) as ctx:
         import nonebot
-        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Bot
         from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
 
         bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
         ctx.receive_event(bot, event)
-        ctx.should_call_send(
-            event,
-            Message(
-                [
-                    MessageSegment.image(
-                        "base64://"
-                        + b64encode(matchers._IMPORT_TOKEN_IMG.read_bytes()).decode()
-                    )
-                ]
-            ),
-            result=None,
-            bot=bot,
-        )
+        # 转发成功即 return：无额外发送（引导图在转发内）
     assert forwarded == [True]
-    assert len(entries) == 4
-    assert all(isinstance(e, str) for e in entries)  # 转发节点为纯文本（图不进转发）
+    assert len(entries) == 5
+    import nonebot_plugin_alconna.uniseg as uniseg
+
+    assert isinstance(entries[3], uniseg.UniMessage)  # 引导图为独立纯图节点
+    assert all(isinstance(e, str) for i, e in enumerate(entries) if i != 3)
 
 
 async def test_help_fallback_two_images(app: App, stores, monkeypatch):
     """非 OneBot / 转发失败：降级为文字渲染图 + 引导图两段图片。"""
-    from base64 import b64encode
 
     from fake import fake_private_message_event_v11
     from nonebot.adapters.onebot.v11 import Message, MessageSegment
