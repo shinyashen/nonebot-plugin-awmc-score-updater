@@ -68,18 +68,14 @@ HELP_TEXT = "\n\n".join(HELP_SECTIONS)
 _IMPORT_TOKEN_IMG = Path(__file__).parent / "assets" / "import_token.jpg"
 
 
-def _help_entries() -> list["str | UniMessage"]:
-    """合并转发节点：水鱼节点附 Import-Token 引导截图。"""
-    entries: list[str | UniMessage] = list(HELP_SECTIONS[:2])
-    # 图片以 raw 字节嵌入：path 形式导出为本地路径引用，转发卡片在
-    # NTQQ/LLBot 下会显示「该消息类型暂不支持查看」
-    entries.append(
-        UniMessage.text(HELP_SECTIONS[2]).append(
-            UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes())
-        )
-    )
-    entries.append(HELP_SECTIONS[3])
-    return entries
+def _help_entries() -> list[str]:
+    """合并转发节点（纯文本）。
+
+    引导图不进转发：转发卡片内的图片段不做富媒体上传，NTQQ 渲染为
+    「该消息类型暂不支持查看」（线上实测，raw 字节与路径两种形式皆然）
+    ——引导图由 handler 在转发成功后单独以普通图片消息发送。
+    """
+    return list(HELP_SECTIONS)
 
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
@@ -344,9 +340,10 @@ async def _(bot: Bot, session: Session = UniSession()):
     group_id = str(session.scene.id) if session.scene.type == SceneType.GROUP else None
     user_id = None if group_id else str(session.user.id)
     if await try_send_forward(bot, _help_entries(), group_id=group_id, user_id=user_id):
+        await UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes()).send()
         return
     guide = UniMessage.image(raw=image_to_bytes(text_to_image(HELP_TEXT)))
-    guide += UniMessage.image(path=_IMPORT_TOKEN_IMG)
+    guide += UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes())
     await guide.finish(at_sender=True)
 
 

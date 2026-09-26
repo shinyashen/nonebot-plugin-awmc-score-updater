@@ -3,6 +3,8 @@
 插件相关导入一律函数内进行（收集期不触发插件加载链）。
 """
 
+from base64 import b64encode
+
 import respx
 import pytest
 from httpx import Response
@@ -509,3 +511,88 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
         )
     assert len(refresh_calls) == 1
     assert calls == [["水鱼", "落雪"], ["水鱼", "落雪"]]
+
+
+async def test_help_forward_then_guide_image(app: App, stores, monkeypatch):
+    """OneBot 合并转发（4 纯文本节点）+ 转发后单独补发引导图。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    forwarded, entries = [], None
+
+    async def fake_forward(bot, ents, *, group_id=None, user_id=None):
+        nonlocal entries
+        forwarded.append(True)
+        entries = list(ents)
+        return True
+
+    monkeypatch.setattr(matchers, "try_send_forward", fake_forward)
+    event = fake_private_message_event_v11(
+        message="导帮助", user_id=12345678, to_me=True
+    )
+    async with app.test_matcher(matchers.help_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.image(
+                        "base64://"
+                        + b64encode(matchers._IMPORT_TOKEN_IMG.read_bytes()).decode()
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+    assert forwarded == [True]
+    assert len(entries) == 4
+    assert all(isinstance(e, str) for e in entries)  # 转发节点为纯文本（图不进转发）
+
+
+async def test_help_fallback_two_images(app: App, stores, monkeypatch):
+    """非 OneBot / 转发失败：降级为文字渲染图 + 引导图两段图片。"""
+    from base64 import b64encode
+
+    from fake import fake_private_message_event_v11
+    from nonebot.adapters.onebot.v11 import Message, MessageSegment
+    from nonebot_plugin_awmc_helper.core.render.tools import (
+        text_to_image,
+        image_to_bytes,
+    )
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async def fake_forward(bot, ents, *, group_id=None, user_id=None):
+        return False
+
+    monkeypatch.setattr(matchers, "try_send_forward", fake_forward)
+    event = fake_private_message_event_v11(
+        message="导帮助", user_id=12345678, to_me=True
+    )
+    expected = Message(
+        [
+            MessageSegment.image(
+                "base64://"
+                + b64encode(image_to_bytes(text_to_image(matchers.HELP_TEXT))).decode()
+            ),
+            MessageSegment.image(
+                "base64://"
+                + b64encode(matchers._IMPORT_TOKEN_IMG.read_bytes()).decode()
+            ),
+        ]
+    )
+    async with app.test_matcher(matchers.help_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(event, expected, result=None, bot=bot)
