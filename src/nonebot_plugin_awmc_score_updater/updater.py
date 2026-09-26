@@ -8,6 +8,12 @@
 
 目标端复用主插件 core.client 的唯一 ``MaimaiClient`` 单例；水鱼/落雪凭据
 直接使用主插件 ``user_binding`` 的导入 token，本插件不存储、不重复绑定。
+
+全链路只消费裸 ``Score``（provider.get_scores_all 直取，不经
+``MaimaiScores.configure`` 扩展，对齐老插件「只填必要字段」）：传分只需
+比达成率/DX 分绝对值并原样上传，扩展项 dx_star/版本/定数既用不上，其内部
+按谱面物量算 dx_star，遇曲库零物量谱面（如缺数据的宴谱）直接除零——
+2026-09-26 线上实测炸掉整条导分链。
 """
 
 import time
@@ -16,7 +22,7 @@ import hashlib
 from typing import Any
 from collections.abc import Callable, Iterable
 
-from maimai_py import MaimaiClient, MaimaiScores
+from maimai_py import MaimaiClient
 from nonebot.log import logger
 from maimai_py.enums import FCType, FSType, RateType
 from maimai_py.models import Score, PlayerIdentifier
@@ -25,7 +31,7 @@ from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
 
 from .saltapi import SaltApiError, deser_score, fetch_score_payload
 
-ChainCallback = Callable[[MaimaiScores, BaseException | None, dict[str, Any]], None]
+ChainCallback = Callable[[list[Score], BaseException | None, dict[str, Any]], None]
 
 
 class SaltArcadeProvider(IScoreProvider):
@@ -136,39 +142,36 @@ def _compare(score: Score, other: Score | None) -> Score | None:
     return score
 
 
-async def _empty_scores(client: MaimaiClient) -> MaimaiScores:
-    return await MaimaiScores(client).configure([])
-
-
 async def _gather(
     client: MaimaiClient,
     providers: list[tuple[Any, PlayerIdentifier | None, dict[str, Any]]],
     callback: ChainCallback | None,
     mode: str,
-) -> list[MaimaiScores]:
-    """并行拉取一组 source/target 的成绩，收集成功结果，失败走 callback。
+) -> list[list[Score]]:
+    """并行拉取一组 source/target 的裸成绩，收集成功结果，失败走 callback。
 
-    单个提供器失败不会中断整批（callback 通知后以空成绩占位），但整体
-    gather 遇到异常仍会向上传播——由 run_update 的重试循环兜底。
+    直接调 ``provider.get_scores_all``，不经 ``client.scores``（后者内部
+    ``configure`` 扩展见模块 docstring）。单个提供器失败不会中断整批
+    （callback 通知后以空成绩占位），但整体 gather 遇到异常仍会向上传播
+    ——由 run_update 的重试循环兜底。
     """
-    empty_scores = await _empty_scores(client)
     tasks = []
     for sp, ident, kwargs in providers:
         if ident is None:
             continue
         if mode == "parallel" or (mode == "fallback" and len(tasks) == 0):
-            task = asyncio.create_task(client.scores(ident, sp))
+            task = asyncio.create_task(sp.get_scores_all(ident, client))
             if callback is not None:
                 task.add_done_callback(
                     lambda t, k=kwargs: callback(
-                        t.result() if not t.exception() else empty_scores,
+                        t.result() if not t.exception() else [],
                         t.exception(),
                         k,
                     )
                 )
             tasks.append(task)
     results = await asyncio.gather(*tasks)
-    return [r for r in results if isinstance(r, MaimaiScores)]
+    return [r for r in results if isinstance(r, list)]
 
 
 async def delta_updates_chain(
@@ -180,8 +183,14 @@ async def delta_updates_chain(
     source_gather_callback: ChainCallback | None = None,
     target_gather_callback: ChainCallback | None = None,
     target_update_callback: ChainCallback | None = None,
+    compare_target: bool = True,
 ) -> int:
-    """增量版 ``MaimaiClient.updates_chain``：源成绩与目标已有成绩比较后仅上传增量。
+    """增量/全量版 ``MaimaiClient.updates_chain``（裸成绩版）。
+
+    ``compare_target=True``：源成绩与目标已有成绩比较后仅上传增量；
+    ``compare_target=False``：全量——不拉取目标、全部上传（原全量走
+    maimai_py ``updates_chain``，其经 ``client.scores`` 触发 configure
+    扩展，同样会除零，2026-09-26 起弃用）。
 
     返回因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数（常规为 0）。
 
@@ -198,19 +207,21 @@ async def delta_updates_chain(
         client, source, source_gather_callback, source_mode
     )
     source_scores_unique: dict[str, Score] = {}
-    for maimai_scores in source_scores_list:
-        for score in maimai_scores.scores:
+    for scores in source_scores_list:
+        for score in scores:
             key = f"{score.id} {score.type} {score.level_index}"
             source_scores_unique[key] = score._join(source_scores_unique.get(key, None))
 
     # 目标成绩拉取并取交集合并（_join_rev：保守基准）
-    target_scores_list = await _gather(
-        client, target, target_gather_callback, target_mode
-    )
-    target_dicts = [
-        {f"{score.id} {score.type} {score.level_index}": score for score in ms.scores}
-        for ms in target_scores_list
-    ]
+    target_dicts: list[dict[str, Score]] = []
+    if compare_target:
+        target_scores_list = await _gather(
+            client, target, target_gather_callback, target_mode
+        )
+        target_dicts = [
+            {f"{score.id} {score.type} {score.level_index}": score for score in scores}
+            for scores in target_scores_list
+        ]
     if target_dicts:
         common_keys = set(target_dicts[0].keys())
         for d in target_dicts[1:]:
@@ -224,11 +235,11 @@ async def delta_updates_chain(
     for key, score in source_scores_unique.items():
         if delta := _compare(score, merged_targets.get(key, None)):
             delta_scores.append(delta)
-    delta_maimai_scores = await MaimaiScores(client).configure(delta_scores)
 
     # 水鱼未收录新曲的成绩会让 update_records 服务端 500（2026-09-26 线上实测：
     # 空载荷 200、含未收录曲目 id 的载荷 500）。过滤基准 = 目标已有成绩出现过的
     # 曲目 id（目标确认收录）；500 后自动降级为仅传已收录部分并报告跳过数。
+    # 全量模式不拉取目标、降级不可用，未收录直接报错（与原 updates_chain 一致）。
     known_song_ids = {score.id % 10000 for d in target_dicts for score in d.values()}
     skipped_unknown = 0
 
@@ -246,8 +257,8 @@ async def delta_updates_chain(
                 )
                 if target_update_callback is not None:
                     upload_tasks[-1].add_done_callback(
-                        lambda t, k=kwargs: target_update_callback(
-                            delta_maimai_scores, t.exception(), k
+                        lambda t, k=kwargs, b=batch: target_update_callback(
+                            b, t.exception(), k
                         )
                     )
 
@@ -280,7 +291,7 @@ async def run_update(
     max_retries: int = 3,
     gather_log_name: str = "salt",
 ) -> tuple[float, int]:
-    """执行一次传分：全量（updates_chain）或增量（delta_updates_chain）。
+    """执行一次传分：全量（跳过目标比对）或增量（与目标比对只传提升）。
 
     失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
     映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数)。
@@ -289,7 +300,7 @@ async def run_update(
         raise SaltApiError("没有可用的成绩数据库，请先绑定水鱼或落雪")
 
     def gather_callback(
-        scores: MaimaiScores, err: BaseException | None, ctx: dict[str, Any]
+        scores: list[Score], err: BaseException | None, ctx: dict[str, Any]
     ) -> None:
         if err:
             logger.error(
@@ -298,17 +309,17 @@ async def run_update(
         else:
             logger.info(
                 f"从{ctx.get('name', gather_log_name)}源获取数据成功，"
-                f"共 {len(scores.scores)} 条成绩"
+                f"共 {len(scores)} 条成绩"
             )
 
     def update_callback(
-        scores: MaimaiScores, err: BaseException | None, ctx: dict[str, Any]
+        scores: list[Score], err: BaseException | None, ctx: dict[str, Any]
     ) -> None:
         if err:
             logger.error(f"更新到目标{ctx.get('name', '?')}失败:\n{err!r}")
         else:
             logger.info(
-                f"更新到目标{ctx.get('name', '?')}成功，共 {len(scores.scores)} 条成绩"
+                f"更新到目标{ctx.get('name', '?')}成功，共 {len(scores)} 条成绩"
             )
 
     start = time.monotonic()
@@ -316,26 +327,17 @@ async def run_update(
     for attempt in range(max_retries + 1):
         skipped = 0
         try:
-            if full:
-                await client.updates_chain(
-                    source,
-                    target,
-                    "parallel",
-                    "parallel",
-                    gather_callback,
-                    update_callback,
-                )
-            else:
-                skipped = await delta_updates_chain(
-                    client,
-                    source,
-                    target,
-                    "parallel",
-                    "parallel",
-                    gather_callback,
-                    gather_callback,
-                    update_callback,
-                )
+            skipped = await delta_updates_chain(
+                client,
+                source,
+                target,
+                "parallel",
+                "parallel",
+                gather_callback,
+                None if full else gather_callback,
+                update_callback,
+                compare_target=not full,
+            )
             return time.monotonic() - start, skipped
         except Exception as e:  # 统一退避重试后交给调用方
             last_exc = e

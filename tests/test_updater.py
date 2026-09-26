@@ -1,8 +1,8 @@
 """传分核心测试：增量算法纯函数 + 链编排。
 
-链编排经 ``MaimaiScores.configure`` 依赖曲库（成绩需在曲库中匹配到曲目
-才会保留），故链测试注入样例曲库（mocks.seed_service），成绩 id/难度均
-取自样例曲目；fake provider 保证不触网络。
+链编排只消费裸 ``Score``（provider.get_scores_all 直取，不经
+``MaimaiScores.configure`` 扩展），对曲库零依赖；仅 SaltArcadeProvider 的
+删除曲过滤用到样例曲库（mocks.seed_service）。fake provider 保证不触网络。
 
 插件相关导入一律函数内进行（收集期不触发插件加载链）。
 """
@@ -182,42 +182,34 @@ async def test_delta_chain_uploads_only_delta(songs):
     assert uploaded == [(231, "DX"), (231, "STANDARD")]  # 仅新增与有提升者
 
 
-async def test_delta_chain_utage_score_passes():
-    """宴谱成绩（6 位机台 id）同样可经链上传。
+async def test_delta_chain_utage_score_passes(songs):
+    """宴谱成绩（6 位机台 id）直接过链上传。
 
-    成绩经曲库 extend 时按 ``id % 10000`` 折基查曲，故注入折基 id=1 且带
-    对应 diff_id 宴谱的曲目。
+    回归保护（2026-09-26 线上实测）：旧链路经 ``MaimaiScores.configure``
+    扩展，按谱面物量算 dx_star——零物量宴谱（如缺数据的 [匿]匿名M）触发
+    ``dx_score / 0`` 崩掉整条导分链。现链路只消费裸 ``Score``，宴谱成绩
+    不再要求曲库能映射到谱面（不注入任何宴谱曲目也照常上传）。
     """
-    from mocks import make_song, make_utage, seed_service
-    from nonebot_plugin_awmc_helper.core.songs import song_service
-
     from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
 
-    await seed_service(
-        song_service,
-        [make_song(1, "宴曲", utage=[make_utage(diff_id=100001)])],
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(
+                song_id=100001,
+                song_type=SongType.UTAGE,
+                level_index=LevelIndex.BASIC,
+            )
+        ]
     )
-    try:
-        client = await _make_client()
-        source = FakeUpdateProvider(
-            [
-                mk_score(
-                    song_id=100001,
-                    song_type=SongType.UTAGE,
-                    level_index=LevelIndex.BASIC,
-                )
-            ]
-        )
-        target = FakeUpdateProvider([])
-        src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
-        targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+    target = FakeUpdateProvider([])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
 
-        await delta_updates_chain(client, src, targets)
+    await delta_updates_chain(client, src, targets)
 
-        assert len(target.updates) == 1
-        assert [s.id for s in target.updates[0]] == [100001]
-    finally:
-        song_service._ready.clear()
+    assert len(target.updates) == 1
+    assert [s.id for s in target.updates[0]] == [100001]
 
 
 async def test_delta_chain_source_failure_propagates(songs):
@@ -267,9 +259,10 @@ async def test_run_update_full_chain(songs):
     source = [(source_provider, PlayerIdentifier(credentials="x"), {"name": "s"})]
     targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
     await run_update(client, source, targets, full=True, max_retries=0)
-    # 全量上传：不与目标比较，源成绩（经曲库 extend）原样上传
+    # 全量上传：不拉取目标、不比较，源合并成绩原样上传
     assert len(target.updates) == 1
     assert [s.id for s in target.updates[0]] == [231]
+    assert target.fetch_count == 0
 
 
 async def test_run_update_no_targets_raises():
