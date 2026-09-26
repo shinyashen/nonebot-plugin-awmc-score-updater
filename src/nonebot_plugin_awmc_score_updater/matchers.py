@@ -191,7 +191,7 @@ async def _run_with_refresh(
             max_retries=plugin_config.awmc_su_max_retries,
         )
         return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
-    except InvalidPlayerIdentifierError:
+    except InvalidPlayerIdentifierError as exc:
         pass
     if not binding.lxns_token or not binding.lxns_refresh_token:
         raise exc
