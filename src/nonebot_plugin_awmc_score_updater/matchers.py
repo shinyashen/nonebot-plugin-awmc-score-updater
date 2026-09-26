@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime
 
 from nonebot import on_command
+from nonebot.log import logger
 from nonebot.params import CommandArg
 from maimai_py.models import PlayerIdentifier
 from nonebot.adapters import Bot, Event, Message
@@ -27,6 +28,8 @@ from maimai_py.exceptions import (
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from nonebot_plugin_alconna.uniseg import UniMessage
+from nonebot_plugin_awmc_helper.core.ext import lxns as lxns_ext
+from nonebot_plugin_awmc_helper.core.store import save_binding
 from nonebot_plugin_awmc_helper.core.utils import handle_errors
 from nonebot_plugin_awmc_helper.core.client import (
     client,
@@ -168,6 +171,56 @@ async def _resolve_qrcode(text: str) -> tuple[str, str]:
     return qr, arcade_user_id
 
 
+async def _run_with_refresh(
+    binding, source: list, qrcode: str | None, full: bool
+) -> tuple[float, int, str | None, list[str]]:
+    """执行一次传分；落雪 access_token 仅 15 分钟有效，上传 401 时用
+    refresh_token 续期落库后重试一次（不限主插件 service 语义——传分
+    凭据与默认查分器无关）。续期失败则原异常上抛，交由错误文案。
+    返回 (用时秒, 跳过条数, 落雪只读提示, 目标名列表)。
+    """
+    targets, lx_note = _build_targets(
+        binding.divingfish_import_token, binding.lxns_token
+    )
+    try:
+        duration, skipped = await run_update(
+            client,
+            source,
+            targets,
+            full=full,
+            max_retries=plugin_config.awmc_su_max_retries,
+        )
+        return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
+    except InvalidPlayerIdentifierError:
+        pass
+    if not binding.lxns_token or not binding.lxns_refresh_token:
+        raise exc
+    if not lxns_ext.oauth_configured():
+        raise exc
+    try:
+        token = await lxns_ext.refresh_token(binding.lxns_refresh_token)
+    except Exception:
+        raise exc from None
+    binding.lxns_token = token.access_token
+    if token.refresh_token:
+        binding.lxns_refresh_token = token.refresh_token
+    if token.friend_code:
+        binding.lxns_friend_code = token.friend_code
+    await save_binding(binding)
+    logger.info("落雪 access_token 已续期，重试传分")
+    targets, lx_note = _build_targets(
+        binding.divingfish_import_token, binding.lxns_token
+    )
+    duration, skipped = await run_update(
+        client,
+        source,
+        targets,
+        full=full,
+        max_retries=plugin_config.awmc_su_max_retries,
+    )
+    return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
+
+
 @update_cmd.handle()
 @handle_errors(except_with_message=(SaltApiError,))
 async def _(
@@ -256,12 +309,8 @@ async def _(
         )
     ]
     try:
-        duration, skipped = await run_update(
-            client,
-            source,
-            targets,
-            full=bool(qrcode),
-            max_retries=plugin_config.awmc_su_max_retries,
+        duration, skipped, lx_note, names = await _run_with_refresh(
+            binding, source, qrcode, full=bool(qrcode)
         )
     except InvalidPlayerIdentifierError:
         await UniMessage.text(
@@ -280,7 +329,7 @@ async def _(
     await wechat_store.set_last_update(
         platform, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
-    target_str = "和".join(kw["name"] for _, _, kw in targets)
+    target_str = "和".join(names)
     if special:
         msg = (
             f"导到{target_str}了喵！\n你这次导了{duration:.2f}秒，很厉害了喵~\n"
