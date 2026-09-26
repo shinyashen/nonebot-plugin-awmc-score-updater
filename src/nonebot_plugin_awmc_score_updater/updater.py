@@ -79,8 +79,9 @@ class SaltArcadeProvider(IScoreProvider):
 def _join_rev(scores: Iterable[Score]) -> Score:
     """目标多源成绩合并（仅在「各源都有该成绩」的交集上调用）：
 
-    达成率/DX 分取各源最小值作为比较基准（保守：宁可多传不可漏传），
-    其余字段取各源最高记录。
+    达成率/DX 分取各源最小值作为比较基准（保守：宁可多传不可漏传）；
+    fc/fs 在有值目标内取更优（fc min / fs max），使单目标独占的更优达成
+    情况也能经上传载荷跨目标补齐；全部缺失仍为 None。
     """
     scores_list = list(scores)
     if not scores_list:
@@ -88,16 +89,13 @@ def _join_rev(scores: Iterable[Score]) -> Score:
     res = scores_list[0]
     res.achievements = min(s.achievements or 0 for s in scores_list)
     res.dx_score = min(s.dx_score or 0 for s in scores_list)
-    res.fc = (
-        FCType(min(s.fc.value for s in scores_list))
-        if all(s.fc is not None for s in scores_list)
-        else None
-    )
-    res.fs = (
-        FSType(max(s.fs.value for s in scores_list))
-        if all(s.fs is not None for s in scores_list)
-        else None
-    )
+    # fc/fs 合成语义与 Hoshino 原版不同（2026-09-26 作者拍板改此处）：
+    # 原版任一目标缺失即基准缺失（all(...) 门控），单目标独占的更优 fc/fs
+    # 永远不会随上传补到缺失的目标上；现改为有值目标内取更优。备查。
+    fc_values = [s.fc.value for s in scores_list if s.fc is not None]
+    res.fc = FCType(min(fc_values)) if fc_values else None
+    fs_values = [s.fs.value for s in scores_list if s.fs is not None]
+    res.fs = FSType(max(fs_values)) if fs_values else None
     res.rate = RateType._from_achievement(res.achievements)
     res.play_count = min(s.play_count or 0 for s in scores_list)
     return res

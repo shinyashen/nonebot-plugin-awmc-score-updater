@@ -94,7 +94,7 @@ def test_join_rev_takes_conservative_base():
         ]
     )
     assert merged.achievements == 98.0
-    assert merged.fc is None  # 任一源缺 fc → 合并结果无 fc（保守基准）
+    assert merged.fc == FCType.FC  # 有值目标内取更优（任一缺失不再清空基准）
     assert merged.play_count == 1
 
 
@@ -379,9 +379,8 @@ async def test_delta_chain_borrows_better_fc_fs_from_targets(songs):
     assert len(water.updates) == 1
     uploaded = water.updates[0][0]
     assert uploaded.achievements == 100.0  # 源更高 → 上传源值
-    assert uploaded.fc == FCType.FCP  # 两目标均有 fc → 基准取更优 FCP，借给源上传
-    # 原版语义边界：落雪缺 fs → 交集基准 fs=None，水鱼独有的 FS 不跨目标补
-    assert uploaded.fs is None
+    assert uploaded.fc == FCType.FCP  # 基准取更优 FCP（FCP 优于 FC），借给源上传
+    assert uploaded.fs == FSType.FS  # 水鱼独有 FS 合入基准 → 落雪借此补齐 fs
 
 
 async def test_delta_chain_no_gain_skips_even_with_fc_gap(songs):
