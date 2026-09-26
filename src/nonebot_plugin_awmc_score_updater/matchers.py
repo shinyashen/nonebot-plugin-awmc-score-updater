@@ -71,9 +71,11 @@ _IMPORT_TOKEN_IMG = Path(__file__).parent / "assets" / "import_token.jpg"
 def _help_entries() -> list["str | UniMessage"]:
     """合并转发节点：水鱼节点附 Import-Token 引导截图。"""
     entries: list[str | UniMessage] = list(HELP_SECTIONS[:2])
+    # 图片以 raw 字节嵌入：path 形式导出为本地路径引用，转发卡片在
+    # NTQQ/LLBot 下会显示「该消息类型暂不支持查看」
     entries.append(
         UniMessage.text(HELP_SECTIONS[2]).append(
-            UniMessage.image(path=_IMPORT_TOKEN_IMG)
+            UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes())
         )
     )
     entries.append(HELP_SECTIONS[3])
