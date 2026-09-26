@@ -123,14 +123,18 @@ def _lxns_writable(token: str) -> bool:
 def _build_targets(
     import_token: str | None, lxns_token: str | None
 ) -> tuple[
-    list[tuple[IScoreUpdateProvider, PlayerIdentifier, dict[str, Any]]], str | None
+    list[tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]],
+    str | None,
 ]:
     """按主插件绑定装配上传目标。
 
     返回 (targets, 落雪不可导提示)：落雪 token 缺 ``write_player`` scope
     （旧版授权，只读）时跳过落雪目标并给出重绑提示，不影响水鱼导出。
+    标识类型含 None 占位与 run_update/链函数签名对齐（list 不型变）。
     """
-    targets: list[tuple[IScoreUpdateProvider, PlayerIdentifier, dict[str, Any]]] = []
+    targets: list[
+        tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]
+    ] = []
     if import_token:
         targets.append(
             (

@@ -114,10 +114,9 @@ def _compare(score: Score, other: Score | None) -> Score | None:
             raise ValueError(
                 "Cannot compare scores with different level indexes or types"
             )
-        if (
-            score.achievements <= other.achievements
-            and score.dx_score <= other.dx_score
-        ):
+        if (score.achievements or 0) <= (other.achievements or 0) and (
+            score.dx_score or 0
+        ) <= (other.dx_score or 0):
             return None
         score.achievements = max(score.achievements or 0, other.achievements or 0)
         score.dx_score = max(score.dx_score or 0, other.dx_score or 0)
@@ -255,11 +254,10 @@ async def delta_updates_chain(
                 upload_tasks.append(
                     asyncio.create_task(client.updates(ident, batch, tp))
                 )
-                if target_update_callback is not None:
+                if (cb := target_update_callback) is not None:
+                    # 闭包内变量收窄失效，回调经默认参数固定为非 None 局部
                     upload_tasks[-1].add_done_callback(
-                        lambda t, k=kwargs, b=batch: target_update_callback(
-                            b, t.exception(), k
-                        )
+                        lambda t, k=kwargs, b=batch, cb=cb: cb(b, t.exception(), k)
                     )
 
     await _schedule_upload(delta_scores)
@@ -284,8 +282,10 @@ async def delta_updates_chain(
 
 async def run_update(
     client: MaimaiClient,
-    source: list[tuple[IScoreProvider, PlayerIdentifier, dict[str, Any]]],
-    target: list[tuple[IScoreUpdateProvider, PlayerIdentifier, dict[str, Any]]],
+    # 与 maimai_py updates_chain 同款签名：允许 None 占位（链内跳过）；
+    # list 对元素类型不型变，收窄为 PlayerIdentifier 会与链函数不兼容
+    source: list[tuple[IScoreProvider, PlayerIdentifier | None, dict[str, Any]]],
+    target: list[tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]],
     *,
     full: bool,
     max_retries: int = 3,
@@ -348,4 +348,5 @@ async def run_update(
                 f"传分第 {attempt + 1}/{max_retries} 次重试（等待 {delay}s）：{e!r}"
             )
             await asyncio.sleep(delay)
-    raise last_exc  # pragma: no cover——循环内必然 return 或 raise
+    # 循环内必然 return 或 raise，此处不可达；last_exc 收窄对类型检查器不可证
+    raise last_exc  # type: ignore  # pragma: no cover

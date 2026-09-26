@@ -133,7 +133,9 @@ def deser_score(raw: dict[str, Any]) -> Score:
     sync = int(raw["syncStatus"])
     return Score(
         id=song_id if song_id > 100000 else song_id % 10000,
-        level=None,
+        # maimai_py 注解 level: str 偏紧：上传序列化（水鱼/落雪 _ser_score）只
+        # 消费 level_index，不读该字段，None 运行时安全
+        level=None,  # type: ignore[reportArgumentType]
         level_index=LevelIndex(level_value) if level_value < 5 else LevelIndex(0),
         achievements=achievement,
         fc=FCType(4 - combo)
