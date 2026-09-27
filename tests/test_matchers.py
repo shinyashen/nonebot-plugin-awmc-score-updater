@@ -465,12 +465,21 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
 
     refresh_calls = []
 
-    async def fake_refresh(binding, exc):
-        refresh_calls.append(exc)
+    async def fake_refresh_lxns(binding):
+        refresh_calls.append(binding)
         binding.lxns_token = "new-token"
-        return True
+        return "refreshed"
 
-    monkeypatch.setattr(binding_service, "refresh_lxns_if_expired", fake_refresh)
+    monkeypatch.setattr(binding_service, "refresh_lxns", fake_refresh_lxns)
+
+    import asyncio as _asyncio
+
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(_asyncio, "sleep", fake_sleep)
 
     calls = []
 
@@ -510,6 +519,7 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
             bot=bot,
         )
     assert len(refresh_calls) == 1
+    assert sleeps == [5]  # 续期后 5s 退避重试（落雪新令牌生效延迟，Q43）
     assert calls == [["水鱼", "落雪"], ["水鱼", "落雪"]]
 
 
@@ -586,3 +596,86 @@ async def test_help_fallback_two_images(app: App, stores, monkeypatch):
         bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
         ctx.receive_event(bot, event)
         ctx.should_call_send(event, expected, result=None, bot=bot)
+
+
+@pytest.mark.asyncio
+async def test_run_with_refresh_ladder_and_copies(monkeypatch):
+    """续期成功后 5s/20s 两级退避阶梯（Q43）：成功路径、全败兜底文案、
+    dead 重绑文案、skip 原样上抛（如水鱼 Import-Token 失效）。"""
+    import asyncio
+
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+    from nonebot_plugin_awmc_helper.core.store import UserBinding
+    from nonebot_plugin_awmc_helper.core.binding import binding_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    binding = UserBinding(
+        platform="OneBot V11",
+        user_id="30001",
+        lxns_token="tok",
+        lxns_refresh_token="rt",
+    )
+
+    async def setup(status: str, n_fail: int):
+        sleeps = []
+        calls = {"n": 0}
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        async def fake_refresh(b):
+            return status
+
+        async def fake_run_update(client, source, target, *, full, max_retries):
+            calls["n"] += 1
+            if calls["n"] <= n_fail:
+                raise InvalidPlayerIdentifierError("unauthorized")
+            return 1.0, 0
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(binding_service, "refresh_lxns", fake_refresh)
+        monkeypatch.setattr(matchers, "run_update", fake_run_update)
+        return sleeps, calls
+
+    # 5s 后成功
+    sleeps, calls = await setup("refreshed", 1)
+    result = await matchers._run_with_refresh(binding, [], None, False)
+    assert result == (1.0, 0, None, ["落雪"])
+    assert calls["n"] == 2
+    assert sleeps == [5]
+
+    # 10s 后成功；进入 10s 档时慢查询提示触发一次
+    notices = []
+
+    async def notify_slow():
+        notices.append(1)
+
+    sleeps, calls = await setup("refreshed", 2)
+    result = await matchers._run_with_refresh(binding, [], None, False, notify_slow)
+    assert result == (1.0, 0, None, ["落雪"])
+    assert calls["n"] == 3
+    assert sleeps == [5, 10]
+    assert len(notices) == 1
+
+    # 全败：非技术兜底文案
+    sleeps, calls = await setup("refreshed", 99)
+    with pytest.raises(matchers.ImportFailed, match="暂时未能同步"):
+        await matchers._run_with_refresh(binding, [], None, False, notify_slow)
+    assert calls["n"] == 3
+    assert sleeps == [5, 10]
+    assert len(notices) == 2
+
+    # dead：重绑文案（不进阶梯）
+    sleeps, calls = await setup("dead", 99)
+    with pytest.raises(matchers.ImportFailed, match="重新绑定落雪"):
+        await matchers._run_with_refresh(binding, [], None, False)
+    assert calls["n"] == 1
+    assert sleeps == []
+
+    # skip：原异常上抛（保留「token 无效」映射给无 rt 场景）
+    sleeps, calls = await setup("skip", 99)
+    with pytest.raises(InvalidPlayerIdentifierError):
+        await matchers._run_with_refresh(binding, [], None, False)
+    assert calls["n"] == 1
+    assert sleeps == []

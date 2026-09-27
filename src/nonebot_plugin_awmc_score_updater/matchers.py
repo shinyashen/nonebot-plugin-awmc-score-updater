@@ -11,6 +11,7 @@
 import re
 import json
 import base64
+import asyncio
 from typing import Any
 from pathlib import Path
 from datetime import datetime
@@ -176,18 +177,27 @@ async def _resolve_qrcode(text: str) -> tuple[str, str]:
     return qr, arcade_user_id
 
 
+class ImportFailed(Exception):
+    """导分失败的准确用户文案（handle_errors 直接展示 message）。"""
+
+
 async def _run_with_refresh(
-    binding, source: list, qrcode: str | None, full: bool
+    binding, source: list, qrcode: str | None, full: bool, notify_slow=None
 ) -> tuple[float, int, str | None, list[str]]:
     """执行一次传分；落雪 access_token 仅 15 分钟有效，上传 401 时用
-    refresh_token 续期落库后重试一次（不限主插件 service 语义——传分
-    凭据与默认查分器无关）。续期失败则原异常上抛，交由错误文案。
-    返回 (用时秒, 跳过条数, 落雪只读提示, 目标名列表)。
+    refresh_token 续期落库后重试（不限主插件 service 语义——传分凭据与
+    默认查分器无关）。返回 (用时秒, 跳过条数, 落雪只读提示, 目标名列表)。
+
+    续期成功后落雪侧新令牌生效有短延迟（实测通常 ≤10s、偶发长至数分钟，
+    主插件 local/QUESTIONS.md Q43）：5s/10s 两级退避重试，仍 401 给非技术
+    兜底文案。续期 dead（rt 已过期）给重绑文案；无凭据/OAuth 未配置
+    （skip）时原异常上抛交由既有映射（如水鱼 Import-Token 失效）。
     """
-    targets, lx_note = _build_targets(
-        binding.divingfish_import_token, binding.lxns_token
-    )
-    try:
+
+    async def attempt():
+        targets, lx_note = _build_targets(
+            binding.divingfish_import_token, binding.lxns_token
+        )
         duration, skipped = await run_update(
             client,
             source,
@@ -196,27 +206,35 @@ async def _run_with_refresh(
             max_retries=plugin_config.awmc_su_max_retries,
         )
         return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
+
+    try:
+        return await attempt()
     except InvalidPlayerIdentifierError as exc:
-        # 落雪 access_token 仅 15 分钟有效：复用主插件自动续期
-        # （refresh_token 换新并落库），成功后以新凭据重试一次
-        if not await binding_service.refresh_lxns_if_expired(binding, exc):
+        status = await binding_service.refresh_lxns(binding)
+        if status == "dead":
+            raise ImportFailed("落雪授权已过期，请重新绑定落雪") from exc
+        if status != "refreshed":
             raise
-    logger.info("落雪 access_token 已续期，重试传分")
-    targets, lx_note = _build_targets(
-        binding.divingfish_import_token, binding.lxns_token
-    )
-    duration, skipped = await run_update(
-        client,
-        source,
-        targets,
-        full=full,
-        max_retries=plugin_config.awmc_su_max_retries,
-    )
-    return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
+    last = None
+    notified = False
+    for delay in (5, 10):
+        if delay >= 10 and notify_slow is not None and not notified:
+            notified = True
+            try:
+                await notify_slow()
+            except Exception:
+                logger.debug("慢查询提示发送失败（不影响导分）")
+        await asyncio.sleep(delay)
+        logger.info("落雪 access_token 已续期，重试传分")
+        try:
+            return await attempt()
+        except InvalidPlayerIdentifierError as exc:
+            last = exc
+    raise ImportFailed("落雪数据暂时未能同步，请一分钟后再试") from last
 
 
 @update_cmd.handle()
-@handle_errors(except_with_message=(SaltApiError,))
+@handle_errors(except_with_message=(SaltApiError, ImportFailed))
 async def _(
     event: Event,
     session: Session = UniSession(),
@@ -302,9 +320,13 @@ async def _(
             {"name": "机台"},
         )
     ]
+
+    async def notify_slow():
+        await UniMessage.text(" 比预期时间要长，再稍等一下…").send(at_sender=True)
+
     try:
         duration, skipped, lx_note, names = await _run_with_refresh(
-            binding, source, qrcode, full=bool(qrcode)
+            binding, source, qrcode, full=bool(qrcode), notify_slow=notify_slow
         )
     except InvalidPlayerIdentifierError:
         await UniMessage.text(
