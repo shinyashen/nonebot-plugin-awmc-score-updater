@@ -1,8 +1,10 @@
 """本插件自有存储（localstore 数据目录 ``awmc_score_updater.db``）。
 
-只存主插件绑定体系没有的数据：华立微信 userID（机台二维码解析产物）与
-上次传分时间。水鱼/落雪凭据**不在本表**——直接复用主插件 ``user_binding``
-（core.binding），用户在主插件完成绑定后本插件即可传分，不重复存储凭据。
+只存主插件绑定体系没有的数据：华立微信 userID（机台二维码解析产物）、
+上次传分时间与每谱面游玩次数（``<难度>pc列表`` 数据源，见
+``local/reference/saltnet-notes.md``——主仓库笔记）。水鱼/落雪凭据**不在
+本表**——直接复用主插件 ``user_binding``（core.binding），用户在主插件
+完成绑定后本插件即可传分，不重复存储凭据。
 """
 
 from pathlib import Path
@@ -10,6 +12,8 @@ from datetime import datetime
 
 from pydantic import NaiveDatetime
 from sqlmodel import Field, SQLModel, select
+from nonebot.log import logger
+from maimai_py.models import Score
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from nonebot_plugin_localstore import get_data_dir
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -101,3 +105,165 @@ class WechatStore:
 
 
 wechat_store = WechatStore()
+
+
+def pc_key(score) -> tuple[int, str, int]:
+    """成绩 → PC 表谱面键（与传分链 delta_updates_chain 的谱面键同构）。
+
+    id：DX 谱折回曲目 id、宴谱保留 6 位机台内部 id（deser_score 产物）；
+    type/level_index 存枚举原始值（value），渲染侧按 ScoreExtend 同构取回。
+    """
+    return (score.id, score.type.value, score.level_index.value)
+
+
+class PlayCount(SQLModel, table=True):
+    """每谱面游玩次数（导分观测落地）。计数主体是华立账号。
+
+    数值语义二态：扫码全量导分 → SaltNet 透传的机台累计真值（权威替换）；
+    简略导分 → 桥接增量（与数据站已有成绩比对，状态有变化 +1，近似：
+    无成绩变化的纯练习不可见，由下次扫码校准自愈）。
+    """
+
+    __tablename__ = "play_count"  # type: ignore[reportGeneralTypeIssues]
+
+    arcade_user_id: str = Field(primary_key=True)
+    music_id: int = Field(primary_key=True)  # 宴谱保留 6 位机台 id（同 deser_score）
+    type: str = Field(primary_key=True)  # SongType.value：standard/dx/utage
+    level_index: int = Field(primary_key=True)  # 0-4；宴谱恒 0（maimai-py 约定）
+    play_count: int = 0
+
+
+def _row_key(row: PlayCount) -> tuple[int, str, int]:
+    """PC 表行 → 谱面键（行内 type/level_index 已是原始值，不再取 .value）。"""
+    return (row.music_id, row.type, row.level_index)
+
+
+class PlayCountSync(SQLModel, table=True):
+    """PC 数据的用户级同步状态（跟华立 id：一次导分全谱面更新，时间无行级意义）。"""
+
+    __tablename__ = "play_count_sync"  # type: ignore[reportGeneralTypeIssues]
+
+    arcade_user_id: str = Field(primary_key=True)
+    last_full_at: NaiveDatetime | None = None  # 最近全量（扫码）导分时间；NULL=从未校准
+
+
+class PlayCountStore:
+    """游玩次数读写：导分链观测落地（observe）与 pc 列表查询（counts）。"""
+
+    @staticmethod
+    async def _sync_row(
+        session: AsyncSession, arcade_user_id: str, when: datetime
+    ) -> None:
+        stmt = select(PlayCountSync).where(
+            PlayCountSync.arcade_user_id == arcade_user_id
+        )
+        if row := (await session.exec(stmt)).first():
+            row.last_full_at = when
+        else:
+            session.add(PlayCountSync(arcade_user_id=arcade_user_id, last_full_at=when))
+
+    async def observe(
+        self,
+        arcade_user_id: str,
+        source_scores: list[Score],
+        baselines: list[dict[tuple[int, str, int], Score]],
+        *,
+        anchored: bool,
+        now: datetime | None = None,
+    ) -> None:
+        """导分成功后落地游玩次数（每条导分链只调用一次）。
+
+        - ``anchored=True``（扫码全量）：权威累计值整表替换并记
+          ``last_full_at``；载荷中 playCount 缺失（null）的谱面保留旧值。
+          现有行数超过载荷两倍视为异常截断（SaltNet 分页事故），放弃替换防清库。
+        - ``anchored=False``（简略）：桥接增量——基线取各数据站已有成绩的
+          并集（先到先得）；基线有该谱且 (达成率, DX 分) 任一变化 → +1
+          （首见行直接以 1 落地）；基线无该谱（数据站全缺，如站侧删除曲）
+          只播 0 值种子行，防「每次导分都算一次」的虚增。
+        - 空载荷直接跳过（拉取失败的占位回调不落库）。
+        """
+        if not source_scores:
+            return
+        when = now or datetime.now()
+        async with AsyncSession(get_engine()) as session:
+            stmt = select(PlayCount).where(PlayCount.arcade_user_id == arcade_user_id)
+            rows = (await session.exec(stmt)).all()
+            existing: dict[tuple[int, str, int], PlayCount] = {
+                _row_key(r): r for r in rows
+            }
+
+            if anchored:
+                if existing and len(source_scores) * 2 < len(existing):
+                    logger.warning(
+                        f"华立账号 {arcade_user_id} 全量导分载荷 "
+                        f"{len(source_scores)} 条远小于既有 PC 行数 "
+                        f"{len(existing)}，疑似截断，放弃替换"
+                    )
+                    return
+                for s in source_scores:
+                    if s.play_count is None:
+                        continue
+                    if row := existing.get(pc_key(s)):
+                        row.play_count = s.play_count
+                    else:
+                        session.add(
+                            PlayCount(
+                                arcade_user_id=arcade_user_id,
+                                music_id=s.id,
+                                type=s.type.value,
+                                level_index=s.level_index.value,
+                                play_count=s.play_count,
+                            )
+                        )
+                await self._sync_row(session, arcade_user_id, when)
+                await session.commit()
+                return
+
+            baseline: dict[tuple[int, str, int], Score] = {}
+            for d in baselines:
+                for k, v in d.items():
+                    baseline.setdefault(k, v)
+
+            def _changed(b: Score | None, s: Score) -> bool:
+                return b is not None and (
+                    (b.achievements or 0) != (s.achievements or 0)
+                    or (b.dx_score or 0) != (s.dx_score or 0)
+                )
+
+            for s in source_scores:
+                k = pc_key(s)
+                if row := existing.get(k):
+                    if _changed(baseline.get(k), s):
+                        row.play_count += 1
+                else:
+                    # 首见行：基线有该谱且状态有变化 → 1（存量用户首导的增量）；
+                    # 基线缺该谱（数据站看不到，如站侧删除曲）→ 0，不虚计
+                    session.add(
+                        PlayCount(
+                            arcade_user_id=arcade_user_id,
+                            music_id=s.id,
+                            type=s.type.value,
+                            level_index=s.level_index.value,
+                            play_count=1 if _changed(baseline.get(k), s) else 0,
+                        )
+                    )
+            await session.commit()
+
+    async def counts(self, arcade_user_id: str) -> list[PlayCount]:
+        """取该华立账号全部游玩次数行（标级/定数过滤在渲染侧按曲库数据做）。"""
+        stmt = select(PlayCount).where(PlayCount.arcade_user_id == arcade_user_id)
+        async with AsyncSession(get_engine()) as session:
+            return list((await session.exec(stmt)).all())
+
+    async def last_full_at(self, arcade_user_id: str) -> datetime | None:
+        """最近全量（扫码）导分时间；从未校准返回 None。"""
+        stmt = select(PlayCountSync).where(
+            PlayCountSync.arcade_user_id == arcade_user_id
+        )
+        async with AsyncSession(get_engine()) as session:
+            if row := (await session.exec(stmt)).first():
+                return row.last_full_at
+        return None
+
+
+play_count_store = PlayCountStore()
