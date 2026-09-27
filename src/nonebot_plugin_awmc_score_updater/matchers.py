@@ -325,7 +325,8 @@ async def _(
         await UniMessage.text(" 比预期时间要长，再稍等一下…").send(at_sender=True)
 
     try:
-        duration, skipped, lx_note, names = await _run_with_refresh(
+        # skipped 仅服务端统计口径，删除曲静默跳过、不向用户提示
+        duration, _skipped, lx_note, names = await _run_with_refresh(
             binding, source, qrcode, full=bool(qrcode), notify_slow=notify_slow
         )
     except InvalidPlayerIdentifierError:
@@ -356,8 +357,6 @@ async def _(
             f"上传分数至{target_str}成功！\n本次上传用时{duration:.2f}秒\n"
             f"上传方式：{'全量上传' if qrcode else '简略上传'}"
         )
-    if skipped:
-        msg += f"\n另有 {skipped} 条成绩被数据站拒绝（删除曲/未收录），已跳过"
     if lx_note:
         msg += f"\n{lx_note}"
     await UniMessage.text(f" {msg}").finish(at_sender=True)

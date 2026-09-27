@@ -173,6 +173,18 @@ async def _gather(
     return [r for r in results if isinstance(r, list)]
 
 
+_LXNS_IDS_CACHE: tuple[float, set[int]] | None = None
+"""落雪曲库 id 集缓存：(拉取时刻, id 集)。TTL 内复用，避免阶梯重试与连续
+导分重复拉列表（该拉取位于计时窗口内，重复拉取会虚增报给用户的用时）。"""
+_LXNS_IDS_TTL = 600.0
+
+
+def _lxns_ids_cache_clear() -> None:
+    """清空曲库 id 缓存（测试用）。"""
+    global _LXNS_IDS_CACHE
+    _LXNS_IDS_CACHE = None
+
+
 async def _lxns_known_song_ids() -> set[int] | None:
     """落雪当前曲库曲目 id 集（已删除曲目不在其中），供落雪目标预过滤。
 
@@ -180,16 +192,23 @@ async def _lxns_known_song_ids() -> set[int] | None:
     典型如已下架的限时宴谱：SaltNet 源有残留成绩、水鱼库仍收录、主插件
     规范表按「一侧缺失、记录保留」策略保留，maimai_py #60 的本地库 by_id
     守卫对此是盲区。取主插件 core.ext.lxns 的曲库列表（轻载荷 notes=false）
-    作过滤基准；任一异常返回 None = 本次不做预过滤（保持旧行为）。
+    作过滤基准，TTL 内复用缓存；任一异常返回 None = 本次不做预过滤
+    （保持旧行为）。
     """
+    global _LXNS_IDS_CACHE
+    now = time.monotonic()
+    if _LXNS_IDS_CACHE is not None and now - _LXNS_IDS_CACHE[0] < _LXNS_IDS_TTL:
+        return _LXNS_IDS_CACHE[1]
     try:
         from nonebot_plugin_awmc_helper.core.ext.lxns import fetch_song_list
 
         data = await fetch_song_list(notes=False)
-        return {int(s["id"]) for s in data.get("songs", []) if "id" in s}
+        ids = {int(s["id"]) for s in data.get("songs", []) if "id" in s}
     except Exception as e:
         logger.warning(f"落雪曲库列表获取失败，本次导分不做落雪侧预过滤：{e!r}")
         return None
+    _LXNS_IDS_CACHE = (now, ids)
+    return ids
 
 
 async def delta_updates_chain(
@@ -271,6 +290,10 @@ async def delta_updates_chain(
                 prefilter_dropped,
                 sum(1 for s in delta_scores if s.id not in allowed),
             )
+    if prefilter_dropped:
+        logger.info(
+            f"落雪曲库不含的曲目成绩 {prefilter_dropped} 条，已剔除（静默跳过）"
+        )
 
     upload_tasks: list[asyncio.Task] = []
 

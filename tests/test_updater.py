@@ -441,8 +441,10 @@ async def test_run_update_prefilters_lxns_target(songs):
     from nonebot_plugin_awmc_score_updater.updater import (
         SaltArcadeProvider,
         run_update,
+        _lxns_ids_cache_clear,
     )
 
+    _lxns_ids_cache_clear()  # 隔离 TTL 缓存
     client = await _make_client()
     source = FakeUpdateProvider(
         [
