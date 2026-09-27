@@ -47,9 +47,6 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 nonebug = { git = "https://github.com/nonebot/nonebug" }
-# 与主插件保持一致：maimai-py 暂钉作者 fork（PyPI 1.5.2 尚未发布最新特性）；
-# PyPI 收录后删除本行即回到跟随最新版。
-maimai-py = { git = "https://github.com/shinyashen/maimai.py", branch = "main" }
 # 主插件仓库暂为私有且未上架 PyPI：开发环境以平级目录 path 依赖解析。
 # 作为 awmc_plugins/ 目录插件部署时由主插件直接加载，不走此解析；
 # 主插件公开/上架后改回 `nonebot-plugin-awmc-helper>=0.1.0` 版本依赖。

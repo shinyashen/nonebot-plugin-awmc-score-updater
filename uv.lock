@@ -1099,8 +1099,8 @@ wheels = [
 
 [[package]]
 name = "maimai-py"
-version = "1.5.2"
-source = { git = "https://github.com/shinyashen/maimai.py?branch=main#0c950dad498c656faca58b231f1e509d991a3dfc" }
+version = "1.5.3"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiocache" },
     { name = "cryptography" },
@@ -1110,6 +1110,10 @@ dependencies = [
     { name = "lxml-stubs" },
     { name = "maimai-ffi" },
     { name = "tenacity" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c7/a5/b46f89575f15ac827f40b4a561624c10b4e2f975d098ce7c46f177a27840/maimai_py-1.5.3.tar.gz", hash = "sha256:0c32b0569ebf3ff940dadf1ff914b4da835ef0c2fb500ca0a179187ca5b00a90", size = 306137, upload-time = "2026-09-27T07:31:46.295Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/1e/8c9eee9acb11b75c99005bce4be6f56366f5afa02676c416b442f88e5ea4/maimai_py-1.5.3-py3-none-any.whl", hash = "sha256:6713759f4dbacc8edb6824b1dcc8694ebf05964bdd7640d52c83ac587233ca1e", size = 318709, upload-time = "2026-09-27T07:31:47.434Z" },
 ]
 
 [[package]]
@@ -1475,7 +1479,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
-    { name = "maimai-py", git = "https://github.com/shinyashen/maimai.py?branch=main" },
+    { name = "maimai-py", specifier = ">=1.5.3" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.60.0,<1.0.0" },
     { name = "nonebot-plugin-apscheduler", specifier = ">=0.5.0,<1.0.0" },
     { name = "nonebot-plugin-localstore", specifier = ">=0.7.4,<1.0.0" },
@@ -1554,7 +1558,7 @@ test = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
-    { name = "maimai-py", git = "https://github.com/shinyashen/maimai.py?branch=main" },
+    { name = "maimai-py", specifier = ">=1.5.2" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.60.0,<1.0.0" },
     { name = "nonebot-plugin-awmc-helper", directory = "../nonebot-plugin-awmc-helper" },
     { name = "nonebot-plugin-localstore", specifier = ">=0.7.4,<1.0.0" },
