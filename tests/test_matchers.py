@@ -216,7 +216,9 @@ async def test_simple_update_flow(app: App, stores, monkeypatch):
     from nonebot_plugin_awmc_score_updater import matchers
     from nonebot_plugin_awmc_score_updater.store import wechat_store
 
-    async def fake_run_update(client, source, target, *, full, max_retries):
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
         assert full is False
         assert len(target) == 2  # 水鱼 + 落雪
         return 1.23, 0
@@ -338,7 +340,9 @@ async def test_lxns_readonly_jwt_with_df_still_exports(app: App, stores, monkeyp
 
     from nonebot_plugin_awmc_score_updater import matchers
 
-    async def fake_run_update(client, source, target, *, full, max_retries):
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
         assert len(target) == 1  # 仅水鱼
         assert target[0][2]["name"] == "水鱼"
         return 0.5, 0
@@ -388,7 +392,9 @@ async def test_lxns_writable_jwt_exports(app: App, stores, monkeypatch):
 
     from nonebot_plugin_awmc_score_updater import matchers
 
-    async def fake_run_update(client, source, target, *, full, max_retries):
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
         assert len(target) == 2  # 水鱼 + 落雪
         assert target[1][2]["name"] == "落雪"
         return 0.8, 0
@@ -483,7 +489,9 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
 
     calls = []
 
-    async def fake_run_update(client, source, target, *, full, max_retries):
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
         calls.append([kw["name"] for _, _, kw in target])
         if len(calls) == 1:
             raise InvalidPlayerIdentifierError("Unauthorized")
@@ -627,7 +635,9 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
         async def fake_refresh(b):
             return status
 
-        async def fake_run_update(client, source, target, *, full, max_retries):
+        async def fake_run_update(
+            client, source, target, *, full, max_retries, pc_hook=None
+        ):
             calls["n"] += 1
             if calls["n"] <= n_fail:
                 raise InvalidPlayerIdentifierError("unauthorized")
@@ -679,3 +689,60 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
         await matchers._run_with_refresh(binding, [], None, False)
     assert calls["n"] == 1
     assert sleeps == []
+
+
+async def test_pc_list_unbound_wechat_hint(app: App, stores, monkeypatch):
+    """pc列表：已绑数据站但未绑微信 → 引导文案（NET/成绩拉取不触网）。"""
+    from types import SimpleNamespace
+
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    await _bind_token(df="a" * 128)
+
+    async def fake_get_scores_all(binding, notify_slow=None):
+        return SimpleNamespace(scores=[])
+
+    monkeypatch.setattr(
+        matchers, "score_service", SimpleNamespace(get_scores_all=fake_get_scores_all)
+    )
+    event = fake_private_message_event_v11(
+        message="13pc列表", user_id=12345678, to_me=True
+    )
+    await _send(
+        app,
+        matchers.pc_list_cmd,
+        event,
+        "尚未绑定微信二维码，暂无游玩次数数据",
+        private=True,
+    )
+
+
+async def test_pc_list_no_data_hint(app: App, stores, monkeypatch):
+    """pc列表：已绑微信但从未导分 → 引导先导分。"""
+    from types import SimpleNamespace
+
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+
+    async def fake_get_scores_all(binding, notify_slow=None):
+        return SimpleNamespace(scores=[])
+
+    monkeypatch.setattr(
+        matchers, "score_service", SimpleNamespace(get_scores_all=fake_get_scores_all)
+    )
+    event = fake_private_message_event_v11(
+        message="13pc列表", user_id=12345678, to_me=True
+    )
+    await _send(
+        app,
+        matchers.pc_list_cmd,
+        event,
+        "暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数",
+        private=True,
+    )

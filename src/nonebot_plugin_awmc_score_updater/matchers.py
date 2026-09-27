@@ -16,9 +16,9 @@ from typing import Any
 from pathlib import Path
 from datetime import datetime
 
-from nonebot import on_command
+from nonebot import on_regex, on_command
 from nonebot.log import logger
-from nonebot.params import CommandArg
+from nonebot.params import CommandArg, RegexGroup
 from maimai_py.models import PlayerIdentifier
 from nonebot.adapters import Bot, Event, Message
 from maimai_py.exceptions import (
@@ -29,17 +29,27 @@ from maimai_py.exceptions import (
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from nonebot_plugin_alconna.uniseg import UniMessage
-from nonebot_plugin_awmc_helper.core.utils import handle_errors
+from nonebot_plugin_awmc_helper.core.score import UserScoreError, score_service
+from nonebot_plugin_awmc_helper.core.utils import (
+    parse_page,
+    slow_notice,
+    handle_errors,
+)
 from nonebot_plugin_awmc_helper.core.client import (
     client,
     lxns_provider,
     divingfish_provider,
 )
-from nonebot_plugin_awmc_helper.core.binding import session_keys, binding_service
+from nonebot_plugin_awmc_helper.core.binding import (
+    session_keys,
+    binding_service,
+    service_display,
+)
 from nonebot_plugin_awmc_helper.core.forward import try_send_forward
+from nonebot_plugin_awmc_helper.core.render.score import DrawScore, score_list_height
 from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to_bytes
 
-from .store import wechat_store
+from .store import wechat_store, play_count_store
 from .config import plugin_config
 from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
 from .updater import SaltArcadeProvider, run_update
@@ -50,7 +60,9 @@ HELP_SECTIONS = [
     "上传国服 maimaiDX 成绩至水鱼/落雪成绩数据库。\n\n"
     "指令：导/传分/上传分数/wmupdate [二维码内容]\n"
     "· 不带二维码 = 简略上传（仅达成率与 DX 分的增量）\n"
-    "· 带二维码 = 全量上传（仅私聊或白名单群）\n"
+    "· 带二维码 = 全量上传（仅私聊或白名单群），并校准游玩次数\n"
+    "· 13pc列表 / 13.0pc列表：游玩次数排行（标级/定数前缀与\n"
+    "  分数列表同口径，支持页码）\n"
     "· 「导」字开头的指令有专属回复喵",
     "绑定机台账号（仅私聊）：\n"
     "绑定微信/bindwx <SGWCMAID.../https...>\n"
@@ -87,6 +99,12 @@ def _help_entries() -> list["str | UniMessage"]:
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
 help_cmd = on_command("导帮助", aliases={"传分帮助", "上传分数帮助"}, block=True)
 bindwx_cmd = on_command("绑定微信", aliases={"bindwx", "微信绑定"}, block=True)
+# 分数前缀与主插件分数列表同口径（DS_RE 同款）：整数=标级（13、13+），
+# 小数=定数（13.0）；13pc列表 即标级 13 全部谱面（定数 13.0-13.5）的 pc 排行
+pc_list_cmd = on_regex(
+    r"^([0-9]+(?:\.[0-9]+)?\+?)\s?pc列表\s?([0-9]+)?$",
+    block=True,
+)
 
 
 _LXNS_JWT_RE = re.compile(r"^[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+$")
@@ -182,7 +200,12 @@ class ImportFailed(Exception):
 
 
 async def _run_with_refresh(
-    binding, source: list, qrcode: str | None, full: bool, notify_slow=None
+    binding,
+    source: list,
+    qrcode: str | None,
+    full: bool,
+    notify_slow=None,
+    pc_hook=None,
 ) -> tuple[float, int, str | None, list[str]]:
     """执行一次传分；落雪 access_token 仅 15 分钟有效，上传 401 时用
     refresh_token 续期落库后重试（不限主插件 service 语义——传分凭据与
@@ -204,6 +227,7 @@ async def _run_with_refresh(
             targets,
             full=full,
             max_retries=plugin_config.awmc_su_max_retries,
+            pc_hook=pc_hook,
         )
         return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
 
@@ -324,10 +348,24 @@ async def _(
     async def notify_slow():
         await UniMessage.text(" 比预期时间要长，再稍等一下…").send(at_sender=True)
 
+    # 游玩次数观测：链路成功后恰好调用一次（扫码全量=权威替换，简略=桥接）
+    async def pc_hook(source_scores, target_dicts):
+        await play_count_store.observe(
+            wb.arcade_user_id,
+            source_scores,
+            target_dicts,
+            anchored=bool(qrcode),
+        )
+
     try:
         # skipped 仅服务端统计口径，删除曲静默跳过、不向用户提示
         duration, _skipped, lx_note, names = await _run_with_refresh(
-            binding, source, qrcode, full=bool(qrcode), notify_slow=notify_slow
+            binding,
+            source,
+            qrcode,
+            full=bool(qrcode),
+            notify_slow=notify_slow,
+            pc_hook=pc_hook,
         )
     except InvalidPlayerIdentifierError:
         await UniMessage.text(
@@ -396,3 +434,76 @@ async def _(
     _, arcade_user_id = await _resolve_qrcode(text)
     await wechat_store.bind(platform, user_id, arcade_user_id)
     await UniMessage.text(" 绑定微信二维码信息成功").finish(at_sender=True)
+
+
+@pc_list_cmd.handle()
+@handle_errors("查询失败", except_with_message=(UserScoreError,))
+async def _(
+    session: Session = UniSession(),
+    groups: tuple = RegexGroup(),
+):
+    """<定数/等级>pc列表：游玩次数降序成绩列表（行卡副行 pc: N，复用主插件版式）。
+
+    分数前缀处理与主插件分数列表一致：带小数点按定数匹配（13.0），否则按
+    标级匹配（13 / 13+）；宴谱按其定数（.0/.7）自然入列。成绩展示字段来自
+    当前数据源（NET 数据源在 get_scores_all 内被 _guard_cn 拦截，仅国服源
+    可用），次数来自本插件 play_count 表。
+    """
+    ds_raw, page_raw = groups
+    page = parse_page(page_raw)
+    platform, user_id = session_keys(session)
+
+    binding = await binding_service.ensure(*session_keys(session))
+    scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
+
+    wb = await wechat_store.get(platform, user_id)
+    if wb is None or not wb.arcade_user_id:
+        await UniMessage.text(" 尚未绑定微信二维码，暂无游玩次数数据").finish(
+            at_sender=True
+        )
+    pc_map = {
+        (r.music_id, r.type, r.level_index): r.play_count
+        for r in await play_count_store.counts(wb.arcade_user_id)
+    }
+    if not pc_map:
+        await UniMessage.text(
+            " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+        ).finish(at_sender=True)
+
+    # 分数前缀同主插件分数列表口径：带小数点=定数，否则=标级；
+    # 宴谱按其定数（.0/.7）自然入列
+    if "." in ds_raw:
+        ds = float(ds_raw)
+        matched = [s for s in scores.scores if abs(s.level_value - ds) < 0.05]
+    else:
+        matched = [s for s in scores.scores if s.level == ds_raw]
+    matched = [
+        s for s in matched if (s.id, s.type.value, s.level_index.value) in pc_map
+    ]
+    if not matched:
+        await UniMessage.text("  没有找到符合条件的成绩").finish(at_sender=True)
+
+    def pc_of(s) -> int:
+        return pc_map[(s.id, s.type.value, s.level_index.value)]
+
+    matched.sort(key=lambda s: (-pc_of(s), -(s.achievements or 0)))
+
+    if page == 1 and await play_count_store.last_full_at(wb.arcade_user_id) is None:
+        await UniMessage.text(
+            " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
+        ).send(at_sender=True)
+
+    end_page = max(1, -(-len(matched) // 80))
+    real = min(max(page, 1), end_page)
+    card = DrawScore(
+        280 + score_list_height(len(matched), real, end_page),
+        service=service_display(binding),
+    )
+    png = card.draw_score_list(
+        ds_raw,
+        matched,
+        real,
+        end_page,
+        sub_of=lambda s: f"pc: {pc_of(s)}",
+    )
+    await UniMessage.image(raw=png).finish(at_sender=True)
