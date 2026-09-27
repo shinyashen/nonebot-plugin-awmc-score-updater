@@ -393,3 +393,87 @@ async def test_delta_chain_no_gain_skips_even_with_fc_gap(songs):
     await delta_updates_chain(client, src, targets)
 
     assert target.updates[0] == []  # 无提升不传，fc 缺口不触发上传
+
+
+async def test_delta_chain_prefilter_allowed_ids(songs):
+    """落雪预过滤（target kwargs.allowed_ids）：其曲库没有的曲目（如已删除
+    限时宴谱）剔除上传并计入 skipped，其余照传（Q44/#60 盲区回归）。"""
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(song_id=231, achievements=100.0, dx_score=2500),
+            mk_score(
+                song_id=111222,
+                song_type=SongType.UTAGE,
+                achievements=96.0,
+                dx_score=0,
+            ),
+        ]
+    )
+    target = FakeUpdateProvider(
+        [mk_score(song_id=231, achievements=99.0, dx_score=2000)]
+    )
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [
+        (
+            target,
+            PlayerIdentifier(credentials="t"),
+            {"name": "落雪", "allowed_ids": {231}},
+        )
+    ]
+
+    skipped = await delta_updates_chain(client, src, targets)
+
+    assert skipped == 1
+    assert [(s.id, s.type.name) for s in target.updates[0]] == [(231, "DX")]
+
+
+async def test_run_update_prefilters_lxns_target(songs):
+    """run_update 对落雪目标按其当前曲库列表预过滤：列表只含 231 → 源里
+    500 的提升被剔除（skipped=1），上传载荷只带 231（列表拉取经 respx）。"""
+    import json as _json
+
+    from respx import mock as respx_mock
+    from maimai_py import LXNSProvider
+
+    from nonebot_plugin_awmc_score_updater.updater import (
+        SaltArcadeProvider,
+        run_update,
+    )
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(song_id=231, achievements=100.0, dx_score=2500),
+            mk_score(song_id=500, achievements=100.0, dx_score=2500),
+        ]
+    )
+    src = [(source, SaltArcadeProvider.make_identifier("42"), {"name": "机台"})]
+    targets = [
+        (
+            LXNSProvider(developer_token="dev"),
+            PlayerIdentifier(credentials="tok"),
+            {"name": "落雪"},
+        )
+    ]
+
+    with respx_mock(assert_all_called=False) as m:
+        m.post(url__regex=r".*/api/v0/oauth/token").respond(
+            200, json={"success": True, "data": {"access_token": "t"}}
+        )
+        m.get(url__regex=r".*/api/v0/maimai/song/list.*").respond(
+            200, json={"success": True, "data": {"songs": [{"id": 231}]}}
+        )
+        m.get(url__regex=r".*/api/v0/user/maimai/player/scores$").respond(
+            200, json={"success": True, "code": 200, "data": []}
+        )
+        post = m.post(url__regex=r".*/api/v0/user/maimai/player/scores$").respond(
+            200, json={"success": True, "code": 200, "data": []}
+        )
+        _, skipped = await run_update(client, src, targets, full=False)
+
+    assert skipped == 1
+    body = _json.loads(post.calls.last.request.content)
+    assert [s["id"] for s in body["scores"]] == [231]

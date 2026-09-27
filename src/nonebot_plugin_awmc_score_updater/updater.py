@@ -22,7 +22,7 @@ import hashlib
 from typing import Any
 from collections.abc import Callable, Iterable
 
-from maimai_py import MaimaiClient
+from maimai_py import LXNSProvider, MaimaiClient
 from nonebot.log import logger
 from maimai_py.enums import FCType, FSType, RateType
 from maimai_py.models import Score, PlayerIdentifier
@@ -173,6 +173,25 @@ async def _gather(
     return [r for r in results if isinstance(r, list)]
 
 
+async def _lxns_known_song_ids() -> set[int] | None:
+    """落雪当前曲库曲目 id 集（已删除曲目不在其中），供落雪目标预过滤。
+
+    落雪对含未收录曲目的上传**整批拒绝**（HTTP 400 ``song not found``）——
+    典型如已下架的限时宴谱：SaltNet 源有残留成绩、水鱼库仍收录、主插件
+    规范表按「一侧缺失、记录保留」策略保留，maimai_py #60 的本地库 by_id
+    守卫对此是盲区。取主插件 core.ext.lxns 的曲库列表（轻载荷 notes=false）
+    作过滤基准；任一异常返回 None = 本次不做预过滤（保持旧行为）。
+    """
+    try:
+        from nonebot_plugin_awmc_helper.core.ext.lxns import fetch_song_list
+
+        data = await fetch_song_list(notes=False)
+        return {int(s["id"]) for s in data.get("songs", []) if "id" in s}
+    except Exception as e:
+        logger.warning(f"落雪曲库列表获取失败，本次导分不做落雪侧预过滤：{e!r}")
+        return None
+
+
 async def delta_updates_chain(
     client: MaimaiClient,
     source: list[tuple[IScoreProvider, PlayerIdentifier | None, dict[str, Any]]],
@@ -242,22 +261,37 @@ async def delta_updates_chain(
     known_song_ids = {score.id % 10000 for d in target_dicts for score in d.values()}
     skipped_unknown = 0
 
+    # 落雪预过滤（kwargs.allowed_ids，见 _lxns_known_song_ids）：其曲库已删除
+    # 的曲目（如过期宴谱）会让上传整批 400，按其曲库提前剔除并计入 skipped
+    prefilter_dropped = 0
+    for _, _, kwargs in target:
+        allowed = kwargs.get("allowed_ids")
+        if allowed is not None:
+            prefilter_dropped = max(
+                prefilter_dropped,
+                sum(1 for s in delta_scores if s.id not in allowed),
+            )
+
     upload_tasks: list[asyncio.Task] = []
 
     async def _schedule_upload(batch: list[Score]) -> None:
         for tp, ident, kwargs in target:
             if ident is None:
                 continue
+            batch_t = batch
+            allowed = kwargs.get("allowed_ids")
+            if allowed is not None:
+                batch_t = [s for s in batch if s.id in allowed]
             if target_mode == "parallel" or (
                 target_mode == "fallback" and not upload_tasks
             ):
                 upload_tasks.append(
-                    asyncio.create_task(client.updates(ident, batch, tp))
+                    asyncio.create_task(client.updates(ident, batch_t, tp))
                 )
                 if (cb := target_update_callback) is not None:
                     # 闭包内变量收窄失效，回调经默认参数固定为非 None 局部
                     upload_tasks[-1].add_done_callback(
-                        lambda t, k=kwargs, b=batch, cb=cb: cb(b, t.exception(), k)
+                        lambda t, k=kwargs, b=batch_t, cb=cb: cb(b, t.exception(), k)
                     )
 
     await _schedule_upload(delta_scores)
@@ -277,7 +311,7 @@ async def delta_updates_chain(
     for r in results:
         if isinstance(r, Exception):
             raise r
-    return skipped_unknown
+    return skipped_unknown + prefilter_dropped
 
 
 async def run_update(
@@ -323,6 +357,16 @@ async def run_update(
             )
 
     start = time.monotonic()
+    # 落雪目标按其当前曲库预过滤（已删除曲目会上传整批 400；获取失败不过滤）
+    if any(isinstance(tp, LXNSProvider) for tp, _, _ in target):
+        known = await _lxns_known_song_ids()
+        if known is not None:
+            target = [
+                (tp, ident, {**kw, "allowed_ids": known})
+                if isinstance(tp, LXNSProvider)
+                else (tp, ident, kw)
+                for tp, ident, kw in target
+            ]
     last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
         skipped = 0
