@@ -24,6 +24,7 @@ from nonebot.adapters import Bot, Event, Message
 from maimai_py.exceptions import (
     InvalidJsonError,
     PrivacyLimitationError,
+    PlayerNotAuthorizedError,
     InvalidPlayerIdentifierError,
 )
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
@@ -139,36 +140,39 @@ def _lxns_writable(token: str) -> bool:
     return _LXNS_WRITE_SCOPE in str(claims.get("scope", ""))
 
 
-def _build_targets(
-    import_token: str | None, lxns_token: str | None
-) -> tuple[
+def _build_targets(binding) -> tuple[
     list[tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]],
     str | None,
 ]:
     """按主插件绑定装配上传目标。
 
-    返回 (targets, 落雪不可导提示)：落雪 token 缺 ``write_player`` scope
-    （旧版授权，只读）时跳过落雪目标并给出重绑提示，不影响水鱼导出。
+    水鱼写入 2026-09-28 起强制 OAuth（Import-Token 带真实数据的写入被服务
+    端 500 拒绝）：凭 subject（ref 摘要，QQ/用户名可派生）优先装配，provider
+    换取 5 分钟 Bearer 票打同一写端点；无 subject 时回退 Import-Token（读仍
+    有效，写入将失败并得到引导授权的文案）。落雪 token 缺 ``write_player``
+    scope（旧版授权，只读）时跳过落雪目标并给出重绑提示，不影响水鱼导出。
     标识类型含 None 占位与 run_update/链函数签名对齐（list 不型变）。
     """
     targets: list[
         tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]
     ] = []
-    if import_token:
+    subject = binding_service.divingfish_subject(binding)
+    df_credentials = subject or binding.divingfish_import_token
+    if df_credentials:
         targets.append(
             (
                 divingfish_provider,
-                PlayerIdentifier(credentials=import_token),
+                PlayerIdentifier(credentials=df_credentials),
                 {"name": "水鱼"},
             )
         )
     lx_note: str | None = None
-    if lxns_token:
-        if _lxns_writable(lxns_token):
+    if binding.lxns_token:
+        if _lxns_writable(binding.lxns_token):
             targets.append(
                 (
                     lxns_provider,
-                    PlayerIdentifier(credentials=lxns_token),
+                    PlayerIdentifier(credentials=binding.lxns_token),
                     {"name": "落雪"},
                 )
             )
@@ -218,9 +222,7 @@ async def _run_with_refresh(
     """
 
     async def attempt():
-        targets, lx_note = _build_targets(
-            binding.divingfish_import_token, binding.lxns_token
-        )
+        targets, lx_note = _build_targets(binding)
         duration, skipped = await run_update(
             client,
             source,
@@ -281,16 +283,18 @@ async def _(
             ).finish(at_sender=True)
 
     binding = await binding_service.get(platform, user_id)
-    if binding is None or not (binding.divingfish_import_token or binding.lxns_token):
+    has_df = binding is not None and bool(
+        binding.divingfish_import_token
+        or binding_service.divingfish_subject(binding)
+    )
+    if binding is None or not (has_df or binding.lxns_token):
         msg = (
             "没绑数据站你怎么导。。。先对我说“导帮助”看看怎么绑定喵"
             if special
             else "尚未绑定水鱼或落雪 token，请先使用 awmc-helper 主插件绑定"
         )
         await UniMessage.text(f" {msg}").finish(at_sender=True)
-    targets, lx_note = _build_targets(
-        binding.divingfish_import_token, binding.lxns_token
-    )
+    targets, lx_note = _build_targets(binding)
     if not targets and lx_note:
         # 只有落雪绑定且为只读旧授权：无目标可导，直接引导重绑
         await UniMessage.text(f" {lx_note}").finish(at_sender=True)
@@ -370,6 +374,11 @@ async def _(
     except InvalidPlayerIdentifierError:
         await UniMessage.text(
             " 成绩导入 token 无效，请到主插件重新绑定水鱼/落雪 token"
+        ).finish(at_sender=True)
+    except PlayerNotAuthorizedError:
+        await UniMessage.text(
+            " 水鱼已要求所有成绩写入走 OAuth 授权："
+            "请发送「绑定水鱼」完成一次授权后重试"
         ).finish(at_sender=True)
     except PrivacyLimitationError:
         await UniMessage.text(" 你没有同意数据站的相关用户协议，无法完成该操作").finish(
