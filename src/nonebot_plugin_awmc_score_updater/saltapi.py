@@ -120,17 +120,20 @@ async def fetch_score_payload(
 def deser_score(raw: dict[str, Any]) -> Score:
     """SaltNet 成绩明细 → maimai-py :class:`Score`。
 
-    - id：DX 谱（id>10000）折回曲目 id；宴谱（>100000）保留 6 位机台内部 id；
+    - id：DX 谱（id>10000）折回曲目 id；宴明细（>100000）保留 6 位机台内部 id；
     - level_index：宴明细的 level 值为 10，超常规枚举范围一律取 LevelIndex(0)
       （maimai-py 约定宴谱 level_index 恒为 0）；
     - fc：SaltNet 状态码 1-4 按 ``4 - n`` 映射 FCType；101.0000% 视为 APP；
-    - fs：状态码对 5 取模落入 FSType 枚举。
+    - fs：状态码对 5 取模落入 FSType 枚举；
+    - play_count：机台协议 UserMusicDetail.playCount——SaltNet 仅在扫码
+      （全量）拉取时透传真值，简略拉取恒为 null → None（2026-09-28 实测）。
     """
     song_id = int(raw["musicId"])
     achievement = int(raw["achievement"]) / 10000
     level_value = int(raw["level"])
     combo = int(raw["comboStatus"])
     sync = int(raw["syncStatus"])
+    raw_pc = raw.get("playCount")
     return Score(
         id=song_id if song_id > 100000 else song_id % 10000,
         # maimai_py 注解 level: str 偏紧：上传序列化（水鱼/落雪 _ser_score）只
@@ -144,7 +147,7 @@ def deser_score(raw: dict[str, Any]) -> Score:
         fs=FSType(sync % 5) if sync else None,
         dx_score=int(raw["deluxscoreMax"]),
         dx_rating=None,
-        play_count=None,
+        play_count=int(raw_pc) if raw_pc is not None else None,
         play_time=None,
         rate=RateType._from_achievement(achievement),
         type=SongType._from_id(song_id),

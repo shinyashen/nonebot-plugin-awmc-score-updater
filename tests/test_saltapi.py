@@ -161,3 +161,19 @@ def test_deser_score_app_theoretical():
     assert score.achievements == 101.0
     assert score.fc is not None
     assert score.fc.name == "APP"
+
+
+def test_deser_score_play_count_mapped():
+    """扫码全量载荷：playCount 真值映射进 Score.play_count。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import deser_score
+
+    raw = {**_detail(200), "playCount": 42}
+    assert deser_score(raw).play_count == 42
+
+
+def test_deser_score_play_count_null_and_absent():
+    """简略载荷 playCount 恒 null（或缺失）→ None。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import deser_score
+
+    assert deser_score({**_detail(200), "playCount": None}).play_count is None
+    assert deser_score(_detail(200)).play_count is None
