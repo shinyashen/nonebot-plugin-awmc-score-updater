@@ -20,7 +20,7 @@ import time
 import asyncio
 import hashlib
 from typing import Any
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Awaitable
 
 from maimai_py import LXNSProvider, MaimaiClient
 from nonebot.log import logger
@@ -32,6 +32,8 @@ from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
 from .saltapi import SaltApiError, deser_score, fetch_score_payload
 
 ChainCallback = Callable[[list[Score], BaseException | None, dict[str, Any]], None]
+# 成功链路的游玩次数观测钩子：(源成绩快照, 各数据站基线字典) —— 见 run_update
+PCHook = Callable[[list[Score], list[dict[str, Score]]], Awaitable[None]]
 
 
 class SaltArcadeProvider(IScoreProvider):
@@ -221,7 +223,7 @@ async def delta_updates_chain(
     target_gather_callback: ChainCallback | None = None,
     target_update_callback: ChainCallback | None = None,
     compare_target: bool = True,
-) -> int:
+) -> tuple[int, list[Score], list[dict[str, Score]]]:
     """增量/全量版 ``MaimaiClient.updates_chain``（裸成绩版）。
 
     ``compare_target=True``：源成绩与目标已有成绩比较后仅上传增量；
@@ -229,7 +231,11 @@ async def delta_updates_chain(
     maimai_py ``updates_chain``，其经 ``client.scores`` 触发 configure
     扩展，同样会除零，2026-09-26 起弃用）。
 
-    返回因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数（常规为 0）。
+    返回 (因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数 + 落雪预
+    过滤剔除数, 源成绩快照, 各数据站基线字典列表)。源成绩为机台真值
+    （_compare 原地合并前快照）、基线为上传前的数据站状态，二者供游玩
+    次数观测（store.observe）比对；基线列表可能为空（全量模式 / 目标
+    拉取全败，此时桥接无基准）。
 
     目标 provider 必须同时支持拉取（IScoreProvider）与上传（IScoreUpdateProvider）。
     """
@@ -248,6 +254,9 @@ async def delta_updates_chain(
         for score in scores:
             key = f"{score.id} {score.type} {score.level_index}"
             source_scores_unique[key] = score._join(source_scores_unique.get(key, None))
+    # PC 观测用源成绩快照：必须在 _compare 之前取——_compare 会原地合并
+    # 目标基准值，合并后的成绩不再反映机台真值
+    source_scores = list(source_scores_unique.values())
 
     # 目标成绩拉取并取交集合并（_join_rev：保守基准）
     target_dicts: list[dict[str, Score]] = []
@@ -334,7 +343,7 @@ async def delta_updates_chain(
     for r in results:
         if isinstance(r, Exception):
             raise r
-    return skipped_unknown + prefilter_dropped
+    return skipped_unknown + prefilter_dropped, source_scores, target_dicts
 
 
 async def run_update(
@@ -347,11 +356,16 @@ async def run_update(
     full: bool,
     max_retries: int = 3,
     gather_log_name: str = "salt",
+    pc_hook: PCHook | None = None,
 ) -> tuple[float, int]:
     """执行一次传分：全量（跳过目标比对）或增量（与目标比对只传提升）。
 
     失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
     映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数)。
+
+    ``pc_hook``：游玩次数观测钩子，链路成功后以 (源成绩快照, 数据站基线)
+    恰好调用一次（重试轮次只在成功那轮触发，不会重复计数）；钩子异常只
+    记日志、不影响导分结果。
     """
     if not target:
         raise SaltApiError("没有可用的成绩数据库，请先绑定水鱼或落雪")
@@ -394,7 +408,7 @@ async def run_update(
     for attempt in range(max_retries + 1):
         skipped = 0
         try:
-            skipped = await delta_updates_chain(
+            skipped, source_scores, target_dicts = await delta_updates_chain(
                 client,
                 source,
                 target,
@@ -405,6 +419,11 @@ async def run_update(
                 update_callback,
                 compare_target=not full,
             )
+            if pc_hook is not None:
+                try:
+                    await pc_hook(source_scores, target_dicts)
+                except Exception:
+                    logger.warning("游玩次数观测失败（不影响本次导分）")
             return time.monotonic() - start, skipped
         except Exception as e:  # 统一退避重试后交给调用方
             last_exc = e

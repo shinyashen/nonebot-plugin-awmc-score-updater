@@ -424,7 +424,7 @@ async def test_delta_chain_prefilter_allowed_ids(songs):
         )
     ]
 
-    skipped = await delta_updates_chain(client, src, targets)
+    skipped, _, _ = await delta_updates_chain(client, src, targets)
 
     assert skipped == 1
     assert [(s.id, s.type.name) for s in target.updates[0]] == [(231, "DX")]
@@ -479,3 +479,86 @@ async def test_run_update_prefilters_lxns_target(songs):
     assert skipped == 1
     body = _json.loads(post.calls.last.request.content)
     assert [s["id"] for s in body["scores"]] == [231]
+
+
+async def test_run_update_pc_hook_called_once_with_snapshot(songs):
+    """pc 观测钩子：成功链路恰好一次；源成绩为 _compare 原地合并前的机台真值，
+    基线为上传前的数据站状态。"""
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    target = FakeUpdateProvider([mk_score(achievements=99.0, dx_score=1000)])
+    source = FakeUpdateProvider([mk_score(achievements=100.0, dx_score=2000)])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+    calls: list = []
+
+    async def hook(source_scores, target_dicts):
+        calls.append((source_scores, target_dicts))
+
+    await run_update(client, src, targets, full=False, max_retries=0, pc_hook=hook)
+    assert len(calls) == 1
+    src_scores, dicts = calls[0]
+    assert [s.achievements for s in src_scores] == [100.0]  # 机台真值，非合并值
+    assert len(dicts) == 1
+    assert next(iter(dicts[0].values())).achievements == 99.0  # 上传前基线
+
+
+async def test_run_update_pc_hook_full_mode_no_baseline(songs):
+    """全量模式：不拉目标 → 基线为空列表（扫码锚定不依赖基线）。"""
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    target = FakeUpdateProvider()
+    source = FakeUpdateProvider([mk_score()])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+    calls: list = []
+
+    async def hook(source_scores, target_dicts):
+        calls.append(target_dicts)
+
+    await run_update(client, src, targets, full=True, max_retries=0, pc_hook=hook)
+    assert calls == [[]]
+
+
+async def test_run_update_pc_hook_failure_swallowed(songs):
+    """钩子异常只记日志，不影响导分结果。"""
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    target = FakeUpdateProvider()
+    source = FakeUpdateProvider([mk_score()])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+
+    async def boom(source_scores, target_dicts):
+        raise RuntimeError("hook failed")
+
+    duration, skipped = await run_update(
+        client, src, targets, full=False, max_retries=0, pc_hook=boom
+    )
+    assert duration >= 0
+    assert skipped == 0
+    assert len(target.updates) == 1
+
+
+async def test_run_update_pc_hook_not_called_on_failure(songs):
+    """上传失败且重试耗尽：钩子不触发（防重试轮次重复计数）。"""
+    import pytest
+
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    target = FakeUpdateProvider(update_fail=True)
+    source = FakeUpdateProvider([mk_score()])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+    calls: list = []
+
+    async def hook(source_scores, target_dicts):
+        calls.append(1)
+
+    with pytest.raises(RuntimeError, match="update failed"):
+        await run_update(client, src, targets, full=False, max_retries=1, pc_hook=hook)
+    assert calls == []
