@@ -176,7 +176,7 @@ async def _gather(
 _LXNS_IDS_CACHE: tuple[float, set[int]] | None = None
 """落雪曲库 id 集缓存：(拉取时刻, id 集)。TTL 内复用，避免阶梯重试与连续
 导分重复拉列表（该拉取位于计时窗口内，重复拉取会虚增报给用户的用时）。"""
-_LXNS_IDS_TTL = 600.0
+_LXNS_IDS_TTL = 180.0
 
 
 def _lxns_ids_cache_clear() -> None:
