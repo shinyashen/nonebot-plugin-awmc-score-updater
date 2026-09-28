@@ -53,7 +53,7 @@ from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to
 from .store import wechat_store, play_count_store
 from .config import plugin_config
 from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
-from .updater import SaltArcadeProvider, run_update
+from .updater import FAIL_TARGET_ATTR, SaltArcadeProvider, run_update
 
 # 合并转发节点与降级图片的文字内容（同源）；水鱼节点附 Import-Token 获取
 # 位置的引导截图（assets/import_token.jpg，沿用 Hoshino 原版素材）
@@ -243,9 +243,13 @@ async def _run_with_refresh(
     try:
         return await attempt()
     except InvalidPlayerIdentifierError as exc:
-        # 水鱼凭据失效同抛此异常：落雪不在本次目标内时不得进续期路径，
-        # 否则白等两级退避后误报「落雪数据暂时未能同步」（异常无 provider
-        # 标识，只能按目标装配判定归属）
+        # 水鱼凭据失效同抛此异常且 maimai_py 异常无 provider 标识：优先读
+        # updater 链内挂到异常上的报错目标名（FAIL_TARGET_ATTR）；无标签时
+        # 退回按目标装配判定——落雪不在目标内必然不是落雪失效。两者均非
+        # 落雪则立即上抛，不白等续期退避（handler 的 token 无效文案本就对）。
+        fail_name = getattr(exc, FAIL_TARGET_ATTR, None)
+        if fail_name is not None and fail_name != "落雪":
+            raise
         if "落雪" not in [kw["name"] for _, _, kw in _build_targets(binding)[0]]:
             raise
         status = await binding_service.refresh_lxns(binding)

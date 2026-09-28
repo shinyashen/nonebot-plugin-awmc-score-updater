@@ -736,6 +736,51 @@ async def test_run_with_refresh_skips_renewal_without_lxns_target(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_with_refresh_df_failure_tagged_does_not_renew(monkeypatch):
+    """双目标下凭据失效按异常标签判定归属（F4 边界）：run_update 经链内
+    回调把报错目标名挂到异常实例上——标签指水鱼时即使落雪也在目标内，
+    也不进续期路径（修复前白等两级退避后误报「落雪数据暂时未能同步」）。"""
+    import asyncio
+
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+    from nonebot_plugin_awmc_helper.core.store import UserBinding
+    from nonebot_plugin_awmc_helper.core.binding import binding_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+    from nonebot_plugin_awmc_score_updater.updater import FAIL_TARGET_ATTR
+
+    binding = UserBinding(
+        platform="OneBot V11",
+        user_id="30003",
+        divingfish_import_token="a" * 128,
+        lxns_token="b" * 32,
+    )
+
+    async def fail_refresh(b):
+        raise AssertionError("水鱼失效不得触发落雪续期")
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        exc = InvalidPlayerIdentifierError("unauthorized")
+        setattr(exc, FAIL_TARGET_ATTR, "水鱼")
+        raise exc
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(binding_service, "refresh_lxns", fail_refresh)
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+
+    with pytest.raises(InvalidPlayerIdentifierError):
+        await matchers._run_with_refresh(binding, [], None, False)
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
 async def test_update_cmd_busy_reply_when_locked(app: App, stores, monkeypatch):
     """同一用户并发「导」互斥（F6）：锁占用时快速回复进行中，
     不再并发拉取/上传（双份成绩、桥接游玩次数双计、observe 撞主键）。"""

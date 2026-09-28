@@ -541,6 +541,56 @@ async def test_delta_chain_snapshot_is_true_copy(songs):
     assert target.updates[0][0].fc == FCType.FCP
 
 
+async def test_run_update_tags_fail_target(songs):
+    """链内取数/上传失败在异常上挂报错目标名（F4 边界）：
+
+    maimai_py 异常无 provider 标识，matchers 的落雪续期归属判定靠该标签
+    区分水鱼/落雪失效（用户点破：错误回调 ctx.name 可作归属依据）。
+    """
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+
+    from nonebot_plugin_awmc_score_updater.updater import FAIL_TARGET_ATTR, run_update
+
+    client = await _make_client()
+    src = [
+        (
+            FakeUpdateProvider([mk_score()]),
+            PlayerIdentifier(credentials="x"),
+            {"name": "机台"},
+        )
+    ]
+
+    class FailingFetch(FakeUpdateProvider):
+        async def get_scores_all(self, identifier, client):
+            raise InvalidPlayerIdentifierError("fetch unauthorized")
+
+    class FailingUpdate(FakeUpdateProvider):
+        async def update_scores(self, identifier, scores, client):
+            raise InvalidPlayerIdentifierError("update unauthorized")
+
+    fetch_fail = FailingFetch([])
+    with pytest.raises(InvalidPlayerIdentifierError) as ei:
+        await run_update(
+            client,
+            src,
+            [(fetch_fail, PlayerIdentifier(credentials="t"), {"name": "落雪"})],
+            full=False,
+            max_retries=0,
+        )
+    assert getattr(ei.value, FAIL_TARGET_ATTR, None) == "落雪"
+
+    update_fail = FailingUpdate([])
+    with pytest.raises(InvalidPlayerIdentifierError) as ei2:
+        await run_update(
+            client,
+            src,
+            [(update_fail, PlayerIdentifier(credentials="t"), {"name": "落雪"})],
+            full=False,
+            max_retries=0,
+        )
+    assert getattr(ei2.value, FAIL_TARGET_ATTR, None) == "落雪"
+
+
 async def test_run_update_pc_hook_full_mode_no_baseline(songs):
     """全量模式：不拉目标 → 基线为空列表（扫码锚定不依赖基线）。"""
     from nonebot_plugin_awmc_score_updater.updater import run_update

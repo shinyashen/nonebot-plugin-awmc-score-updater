@@ -36,6 +36,40 @@ ChainCallback = Callable[[list[Score], BaseException | None, dict[str, Any]], No
 # 成功链路的游玩次数观测钩子：(源成绩快照, 各数据站基线字典) —— 见 run_update
 PCHook = Callable[[list[Score], list[dict[str, Score]]], Awaitable[None]]
 
+FAIL_TARGET_ATTR = "_awmc_fail_target"
+"""异常实例上报错目标名的属性键。
+
+maimai_py 异常（InvalidPlayerIdentifierError 等）无 provider 标识，水鱼凭据
+失效与落雪同抛同型；链内取数/上传失败时把 kwargs.name 挂到异常实例上（免
+包装类型、保持 maimai_py 异常族原样上抛），matchers 的落雪续期归属判定据此
+区分是哪一数据站失效。
+"""
+
+
+def _tag_fail_target(exc: BaseException, name: str) -> None:
+    try:
+        setattr(exc, FAIL_TARGET_ATTR, name)
+    except AttributeError:
+        pass  # 极少数带 __slots__ 的异常类型挂不上，放弃归属信息
+
+
+async def _fetch_tagged(name: str, sp, ident, client) -> list[Score]:
+    """provider 取数；失败时在异常上挂目标名（见 FAIL_TARGET_ATTR）。"""
+    try:
+        return await sp.get_scores_all(ident, client)
+    except Exception as e:
+        _tag_fail_target(e, name)
+        raise
+
+
+async def _update_tagged(name: str, ident, batch: list[Score], tp, client) -> None:
+    """provider 上传；失败时在异常上挂目标名（见 FAIL_TARGET_ATTR）。"""
+    try:
+        await client.updates(ident, batch, tp)
+    except Exception as e:
+        _tag_fail_target(e, name)
+        raise
+
 
 class SaltArcadeProvider(IScoreProvider):
     """SaltNet 微信成绩源：经 Realtvop 代理拉取华立微信端成绩明细。"""
@@ -162,7 +196,9 @@ async def _gather(
         if ident is None:
             continue
         if mode == "parallel" or (mode == "fallback" and len(tasks) == 0):
-            task = asyncio.create_task(sp.get_scores_all(ident, client))
+            task = asyncio.create_task(
+                _fetch_tagged(kwargs.get("name", ""), sp, ident, client)
+            )
             if callback is not None:
                 task.add_done_callback(
                     lambda t, k=kwargs: callback(
@@ -319,7 +355,11 @@ async def delta_updates_chain(
                 target_mode == "fallback" and not upload_tasks
             ):
                 upload_tasks.append(
-                    asyncio.create_task(client.updates(ident, batch_t, tp))
+                    asyncio.create_task(
+                        _update_tagged(
+                            kwargs.get("name", ""), ident, batch_t, tp, client
+                        )
+                    )
                 )
                 if (cb := target_update_callback) is not None:
                     # 闭包内变量收窄失效，回调经默认参数固定为非 None 局部
