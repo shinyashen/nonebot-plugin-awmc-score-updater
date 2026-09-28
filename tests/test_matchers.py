@@ -237,7 +237,7 @@ async def test_simple_update_flow(app: App, stores, monkeypatch):
     await _bind_token(df="a" * 128, lx="b" * 32)
     await _bind_wechat("888")
 
-    payload = {"userMusicList": [{"userMusicDetailList": [{"musicId": 200}]}]}
+    payload = {"userMusicList": [{"userMusicDetailList": [{"musicId": 199}]}]}
     respx.post(f"{MAIN}/updateUser").mock(return_value=Response(200, json=payload))
 
     event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
@@ -1164,23 +1164,37 @@ async def test_run_with_refresh_partial_lxns_dead_rebind_hint(monkeypatch):
     assert "重新绑定落雪" in str(failures[0][1])
 
 
+_EXT_TITLES = {
+    8: "True Love Song",
+    199: "チルノのパーフェクトさんすう教室",
+    624: "KISS CANDY FLAVOR",
+}
+"""样例曲真实曲名（与 mocks.sample_songs 同源）。"""
+
+
 def _mk_ext(
     song_id: int,
     *,
     typ=None,
     li=None,
     ach: float = 99.5,
-    version: int = 22000,
+    level: str = "13",
+    level_value: float = 13.0,
+    version: int = 26000,
     ra: int = 200,
 ):
-    """构造 ScoreExtend（pc50 聚合/渲染输入；默认 DX/MASTER）。"""
+    """构造 ScoreExtend（pc50 聚合/渲染输入；默认 199 DX MASTER 真实谱面）。
+
+    version/level/level_value 传真实值（199 DX=26000/13/13.0 等）；
+    ra 为合理构造值（口径：成绩数值保持构造，见 mocks.py 头注）。
+    """
     from dataclasses import asdict
 
     from maimai_py import Score, RateType, SongType, LevelIndex, ScoreExtend
 
     base = Score(
         id=song_id,
-        level="13",
+        level=level,
         level_index=li or LevelIndex.MASTER,
         achievements=ach,
         fc=None,
@@ -1194,8 +1208,8 @@ def _mk_ext(
     )
     return ScoreExtend(
         **asdict(base),
-        title=f"s{song_id}",
-        level_value=13.0,
+        title=_EXT_TITLES.get(song_id, f"（构造）s{song_id}"),
+        level_value=level_value,
         level_dx_score=3000,
         dx_star=None,
         version=version,
@@ -1259,14 +1273,19 @@ async def test_pc50_no_data_hint(app: App, stores):
 
 async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     """pc50 全链路（谱面粒度）：每谱面一行、按自身 pc 降序 → build_bests 拆
-    旧 35/新 15 → B50 版式（副行 pc 钩子同 13pc列表；头部 rating 为所列成绩
-    RA 之和；pc=0 种子行与无 pc 行不入榜；已校准不发提示）。"""
+     旧 35/新 15 → B50 版式（副行 pc 钩子同 13pc列表；头部 rating 为所列成绩
+     RA 之和；pc=0 种子行与无 pc 行不入榜；已校准不发提示）。
+
+     锚真实曲 + 真实版本码：199 DX（CiRCLE v26000，新版本侧）/199 SD
+    （GREEN v12000）/624（むらさき PLUS v18500）/8（初代 v10000）。
+     新旧侧下界 = maimai_py current_version（25500 PRiSM PLUS）。
+    """
     from types import SimpleNamespace
     from base64 import b64encode as b64
 
     import nonebot
     from fake import fake_private_message_event_v11
-    from maimai_py import SongType, current_version
+    from maimai_py import SongType, LevelIndex, current_version
     from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
     from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
 
@@ -1276,19 +1295,51 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     await _bind_token(df="a" * 128)
     await _bind_wechat("888")
 
-    current = current_version.value
+    # 切分边界前置校验：版本码语义随 maimai_py current_version 推移，若上游
+    # 变更（如 CN 追平 CiRCLE），本用例的新旧侧归属需按真实口径重推
+    assert 26000 >= current_version.value > 18500
     rows = [
-        # 曲 231（旧版本）：DX 3 次、SD 1 次——各自独立成行
-        _mk_ext(10231, version=current - 1, ra=150),
-        _mk_ext(231, typ=SongType.STANDARD, version=current - 1, ach=98.0, ra=120),
-        # 曲 500（新版本）：5 次
-        _mk_ext(500, version=current, ra=300),
-        # 曲 700（旧版本）：9 次 → 全场第一
-        _mk_ext(700, version=current - 1, ra=100),
-        # 曲 800（新版本）：pc=0 种子行 → 不入榜
-        _mk_ext(800, version=current, ra=999),
-        # 曲 900（旧版本）：pc 表无行 → 不入榜
-        _mk_ext(900, version=current - 1, ra=999),
+        # 曲 199 DX（v26000 新版本侧）：5 次 → b15
+        _mk_ext(199, version=26000, ra=150),
+        # 曲 199 SD（v12000 旧版本）：3 次——谱面粒度与 DX 各自成行
+        _mk_ext(
+            199,
+            typ=SongType.STANDARD,
+            ach=98.0,
+            level_value=13.3,
+            version=12000,
+            ra=120,
+        ),
+        # 曲 624（v18500 旧版本）：1 次
+        _mk_ext(624, typ=SongType.STANDARD, level_value=13.4, version=18500, ra=300),
+        # 曲 8（v10000 旧版本）：9 次 → 全场第一
+        _mk_ext(
+            8,
+            typ=SongType.STANDARD,
+            level="12",
+            level_value=12.4,
+            version=10000,
+            ra=100,
+        ),
+        # 曲 199 DX BASIC（v26000）：pc=0 种子行 → 不入榜
+        _mk_ext(
+            199,
+            li=LevelIndex.BASIC,
+            level="3",
+            level_value=3.0,
+            version=26000,
+            ra=999,
+        ),
+        # 曲 624 SD BASIC（v18500）：pc 表无行 → 不入榜
+        _mk_ext(
+            624,
+            typ=SongType.STANDARD,
+            li=LevelIndex.BASIC,
+            level="4",
+            level_value=4.0,
+            version=18500,
+            ra=999,
+        ),
     ]
 
     async def fake_get_scores_all(binding, notify_slow=None):
@@ -1322,11 +1373,11 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     await play_count_store.observe(
         "888",
         [
-            _mk_pc(10231, 3),
-            _mk_pc(231, 1, typ=SongType.STANDARD),
-            _mk_pc(500, 5),
-            _mk_pc(700, 9),
-            _mk_pc(800, 0),
+            _mk_pc(199, 5),
+            _mk_pc(199, 3, typ=SongType.STANDARD),
+            _mk_pc(624, 1, typ=SongType.STANDARD),
+            _mk_pc(8, 9, typ=SongType.STANDARD),
+            _mk_pc(199, 0, li=LevelIndex.BASIC),  # 0 值种子行
         ],
         [],
         anchored=True,
@@ -1344,13 +1395,13 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
         )
 
     assert captured["name"] == "nick"
-    assert [s.id for s in captured["b35"]] == [700, 10231, 231]  # pc 9>3>1 降序
-    assert [s.id for s in captured["b15"]] == [500]
+    assert [s.id for s in captured["b35"]] == [8, 199, 624]  # pc 9>3>1 降序
+    assert [s.id for s in captured["b15"]] == [199]  # 199 DX（新版本侧）
     # 头部 rating = 所列成绩 RA 之和（模板占位口径）
-    assert captured["rating"] == 100 + 150 + 120 + 300
-    assert captured["rb35"] == 370
-    assert captured["rb15"] == 300
+    assert captured["rating"] == 100 + 120 + 300 + 150
+    assert captured["rb35"] == 100 + 120 + 300
+    assert captured["rb15"] == 150
     sub_of = captured["kw"]["sub_of"]
-    assert sub_of(captured["b35"][0]) == "pc: 9"  # 曲 700
-    assert sub_of(captured["b35"][1]) == "pc: 3"  # 曲 231 DX 谱面自身 pc
-    assert sub_of(captured["b35"][2]) == "pc: 1"  # 曲 231 SD 谱面自身 pc
+    assert sub_of(captured["b35"][0]) == "pc: 9"  # 曲 8
+    assert sub_of(captured["b35"][1]) == "pc: 3"  # 曲 199 SD 谱面自身 pc
+    assert sub_of(captured["b35"][2]) == "pc: 1"  # 曲 624

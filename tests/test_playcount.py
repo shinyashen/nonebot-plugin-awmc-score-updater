@@ -21,13 +21,14 @@ async def pc_store(tmp_path):
 
 
 def mk(
-    song_id: int = 231,
+    song_id: int = 199,
     ach: float = 100.0,
     dx: int = 2000,
     pc: int | None = None,
     li: LevelIndex = LevelIndex.MASTER,
     typ: SongType = SongType.DX,
 ) -> Score:
+    """样例成绩：默认 199 DX MASTER（真实谱面）；8/624 仅 SD 谱，用 typ 指明。"""
     return Score(
         id=song_id,
         level=None,
@@ -46,23 +47,37 @@ def mk(
 
 async def test_anchor_replaces_with_truth(pc_store):
     """扫码全量：playCount 真值整表替换并记 last_full_at。"""
-    await pc_store.observe("u1", [mk(pc=5), mk(song_id=500, pc=1)], [], anchored=True)
+    await pc_store.observe(
+        "u1",
+        [mk(pc=5), mk(song_id=624, pc=1, typ=SongType.STANDARD)],
+        [],
+        anchored=True,
+    )
     rows = {(r.music_id, r.play_count) for r in await pc_store.counts("u1")}
-    assert rows == {(231, 5), (500, 1)}
+    assert rows == {(199, 5), (624, 1)}
     assert await pc_store.last_full_at("u1") is not None
 
     # 再次校准覆盖旧值
     await pc_store.observe("u1", [mk(pc=9)], [], anchored=True)
     rows = {(r.music_id, r.play_count) for r in await pc_store.counts("u1")}
-    assert rows == {(231, 9), (500, 1)}  # 本次载荷缺失的谱面行保留
+    assert rows == {(199, 9), (624, 1)}  # 本次载荷缺失的谱面行保留
 
 
 async def test_anchor_truncation_guard(pc_store):
     """截断守卫：载荷条目不足既有行数一半 → 放弃替换。"""
-    await pc_store.observe("u1", [mk(i, pc=i) for i in (1, 2, 3, 4)], [], anchored=True)
-    await pc_store.observe("u1", [mk(1, pc=99)], [], anchored=True)
-    rows = {r.play_count for r in await pc_store.counts("u1") if r.music_id == 1}
-    assert rows == {1}  # 未被 99 覆盖
+    await pc_store.observe(
+        "u1",
+        [
+            mk(8, pc=1, typ=SongType.STANDARD),
+            mk(pc=2),
+            mk(624, pc=3, typ=SongType.STANDARD),
+        ],
+        [],
+        anchored=True,
+    )
+    await pc_store.observe("u1", [mk(pc=99)], [], anchored=True)
+    rows = {r.play_count for r in await pc_store.counts("u1") if r.music_id == 199}
+    assert rows == {2}  # 未被 99 覆盖
 
 
 async def test_anchor_null_playcount_keeps_old(pc_store):
@@ -75,10 +90,9 @@ async def test_anchor_null_playcount_keeps_old(pc_store):
 
 async def test_bridge_seeds_then_increments_on_diff(pc_store):
     """简略导分桥接：首见播 0 值种子；基线状态有变化 +1；无变化不动。"""
-    baseline_dicts = [{"k": mk(ach=99.0, dx=1000)}]
-    key = (231, "dx", 3)
-    # 源成绩 231/dx/master 与基线同键（mk 默认 231/dx/master）
-    baseline_dicts = [{(231, "dx", 3): mk(ach=99.0, dx=1000)}]
+    # 199 DX MASTER（谱面键 (199, "dx", 3)，与 mk 默认同键）
+    key = (199, "dx", 3)
+    baseline_dicts = [{key: mk(ach=99.0, dx=1000)}]
 
     # 第一次简略导分：无任何基线可全缺 → 种子 0
     await pc_store.observe("u1", [mk(ach=99.0, dx=1000)], [], anchored=False)
@@ -114,16 +128,20 @@ async def test_bridge_baseline_missing_no_phantom(pc_store):
 async def test_bridge_multi_target_union_baseline(pc_store):
     """多数据站基线取并集（先到先得）。"""
     await pc_store.observe("u1", [mk(ach=99.0, dx=1000)], [], anchored=False)  # 种子
-    d1 = {(231, "dx", 3): mk(ach=99.0, dx=1000)}
-    d2 = {(500, "dx", 3): mk(ach=98.0, dx=900)}
+    d1 = {(199, "dx", 3): mk(ach=99.0, dx=1000)}
+    # 624 仅 SD 谱（(624, "standard", 3) = SD MASTER）
+    d2 = {(624, "standard", 3): mk(ach=98.0, dx=900, typ=SongType.STANDARD)}
     await pc_store.observe(
         "u1",
-        [mk(ach=100.0, dx=2000), mk(song_id=500, ach=99.0, dx=950)],
+        [
+            mk(ach=100.0, dx=2000),
+            mk(song_id=624, ach=99.0, dx=950, typ=SongType.STANDARD),
+        ],
         [d1, d2],
         anchored=False,
     )
     counts = {(r.music_id, r.play_count) for r in await pc_store.counts("u1")}
-    assert counts == {(231, 1), (500, 1)}
+    assert counts == {(199, 1), (624, 1)}
 
 
 async def test_empty_source_scores_noop(pc_store):
