@@ -21,6 +21,7 @@ from nonebot.params import CommandArg, RegexGroup
 from maimai_py.models import PlayerIdentifier
 from nonebot.adapters import Bot, Event, Message
 from maimai_py.exceptions import (
+    RateLimitError,
     InvalidJsonError,
     PrivacyLimitationError,
     PlayerNotAuthorizedError,
@@ -71,7 +72,8 @@ HELP_SECTIONS = [
     "导分依赖主插件 awmc-helper 的绑定，请先在主插件完成（发给 bot 即可）：\n"
     "绑定水鱼token <Import-Token> —— 绑定后才能导分水鱼。\n"
     "获取方式见下图：水鱼查分器个人页 → 设置 → 生成 Import-Token。\n"
-    "注意：仅「绑定水鱼 <用户名>」的公开查询档无法导分，必须绑定 Import-Token",
+    "注意：仅「绑定水鱼 <用户名>」的公开查询档无法导分；也可发「绑定水鱼」\n"
+    "完成一次 OAuth 授权代替 Import-Token（水鱼现已强制写入走授权）",
     "绑定落雪：在主插件发送「绑定落雪」，按回复的授权链接完成落雪授权，"
     "再把授权码直接回复给 bot（无需任何前缀，90 秒内有效）。\n"
     "新版授权自带成绩上传权限；旧版授权会在导分时提示重新绑定",
@@ -148,17 +150,24 @@ def _build_targets(
     """按主插件绑定装配上传目标。
 
     水鱼写入 2026-09-28 起强制 OAuth（Import-Token 带真实数据的写入被服务
-    端 500 拒绝）：凭 subject（ref 摘要，QQ/用户名可派生）优先装配，provider
-    换取 5 分钟 Bearer 票打同一写端点；无 subject 时回退 Import-Token（读仍
-    有效，写入将失败并得到引导授权的文案）。落雪 token 缺 ``write_player``
-    scope（旧版授权，只读）时跳过落雪目标并给出重绑提示，不影响水鱼导出。
-    标识类型含 None 占位与 run_update/链函数签名对齐（list 不型变）。
+    端 500 拒绝），导分凭据必须是**用户显式建立的凭据**：OAuth consent
+    （``divingfish_oauth``，设备码授权 scope 一次带齐 read+write → subject
+    换票含写权限）或 Import-Token（读基线仍有效，写入将失败并得到引导授权
+    的部分失败提示）。仅 QQ 号/用户名可派生的 ref subject 只是公开标识，
+    不再单独构成导分凭据——存量「仅 QQ」行（consent 至多多读、普遍缺失）
+    换票/写入必败，装配它只会把本来成功的他站导分拖死。落雪 token 缺
+    ``write_player`` scope（旧版授权，只读）时跳过落雪目标并给出重绑提示，
+    不影响水鱼导出。标识类型含 None 占位与 run_update/链函数签名对齐
+    （list 不型变）。
     """
     targets: list[
         tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]
     ] = []
-    subject = binding_service.divingfish_subject(binding)
-    df_credentials = subject or binding.divingfish_import_token
+    if binding.divingfish_oauth:
+        subject = binding_service.divingfish_subject(binding)
+        df_credentials = subject or binding.divingfish_import_token
+    else:
+        df_credentials = binding.divingfish_import_token
     if df_credentials:
         targets.append(
             (
@@ -204,6 +213,27 @@ class ImportFailed(Exception):
     """导分失败的准确用户文案（handle_errors 直接展示 message）。"""
 
 
+def _failure_hint(name: str, exc: Exception) -> str:
+    """部分失败目标的用户文案：按异常类型映射，目标名点明是哪一站没导上。"""
+    if isinstance(exc, ImportFailed):
+        return str(exc)  # 续期阶梯产物（重绑/暂时未能同步），文案已完整
+    if isinstance(exc, PlayerNotAuthorizedError):
+        if name == "水鱼":
+            return "水鱼已要求成绩写入走 OAuth 授权，请发送「绑定水鱼」完成一次授权"
+        return f"{name}未授权成绩写入，请重新「绑定{name}」"
+    if isinstance(exc, InvalidPlayerIdentifierError):
+        if name == "水鱼":
+            return "水鱼 Import-Token 已失效，请到主插件重新绑定"
+        return f"{name}凭据已失效，请重新「绑定{name}」"
+    if isinstance(exc, PrivacyLimitationError):
+        return f"未同意{name}的相关用户协议，无法完成该操作"
+    if isinstance(exc, InvalidJsonError):
+        return f"{name}服务暂时不可用（可能维护中），请稍后再试"
+    if isinstance(exc, RateLimitError):
+        return f"{name}今日请求配额已用完，请明天再试"
+    return f"{name}导出失败：{exc!r}"
+
+
 _import_locks: dict[tuple[str, str], asyncio.Lock] = {}
 """按 (platform, user_id) 的导分互斥锁：同一用户并发「导」会各自按同一旧
 基线判增量（双份拉取/上传）、桥接游玩次数双计、observe 撞主键被吞。锁表
@@ -217,20 +247,24 @@ async def _run_with_refresh(
     full: bool,
     notify_slow=None,
     pc_hook=None,
-) -> tuple[float, int, str | None, list[str]]:
-    """执行一次传分；落雪 access_token 仅 15 分钟有效，上传 401 时用
-    refresh_token 续期落库后重试（不限主插件 service 语义——传分凭据与
-    默认查分器无关）。返回 (用时秒, 跳过条数, 落雪只读提示, 目标名列表)。
+) -> tuple[float, int, str | None, list[str], list[tuple[str, Exception]]]:
+    """执行一次传分；落雪 access_token 仅 15 分钟有效，凭据失效（401）时用
+    refresh_token 续期落库后重试（不限主插件 service 语义）。返回 (用时秒,
+    跳过条数, 落雪只读提示, 目标名列表, 部分失败目标列表)。
 
-    续期成功后落雪侧新令牌生效有短延迟（实测通常 ≤10s、偶发长至数分钟，
-    主插件 local/QUESTIONS.md Q43）：5s/10s 两级退避重试，仍 401 给非技术
-    兜底文案。续期 dead（rt 已过期）给重绑文案；无凭据/OAuth 未配置
-    （skip）时原异常上抛交由既有映射（如水鱼 Import-Token 失效）。
+    落雪续期两条入口汇入同一阶梯（5s/10s 退避，Q43 新令牌生效延迟）：
+    - 整链失败（run_update 上抛：全部目标失败/源失败）且归属落雪——续期后
+      重试，耗尽抛 ImportFailed「暂时未能同步」（handler 映射为整链文案）；
+    - 部分失败（他站成功、落雪 401 进失败列表）——同样续期重试，耗尽后
+      落雪失败项改记「暂时未能同步」随返回，他站成功结果不受影响。
+    续期 dead（rt 已过期）分两态：整链抛「重新绑定落雪」；部分失败把落雪
+    失败项改记同款重绑文案。skip（无凭据/OAuth 未配置）整链原样上抛、
+    部分失败原样保留（如水鱼 Import-Token 失效文案本就准确）。
     """
 
     async def attempt():
         targets, lx_note = _build_targets(binding)
-        duration, skipped = await run_update(
+        duration, skipped, failures = await run_update(
             client,
             source,
             targets,
@@ -238,15 +272,41 @@ async def _run_with_refresh(
             max_retries=plugin_config.awmc_su_max_retries,
             pc_hook=pc_hook,
         )
-        return duration, skipped, lx_note, [kw["name"] for _, _, kw in targets]
+        return (
+            duration,
+            skipped,
+            lx_note,
+            [kw["name"] for _, _, kw in targets],
+            failures,
+        )
+
+    def lx_auth_failure(
+        failures: list[tuple[str, Exception]],
+    ) -> InvalidPlayerIdentifierError | None:
+        """部分失败列表中的落雪凭据失效项（401 类，续期重试对象）。"""
+        return next(
+            (
+                exc
+                for name, exc in failures
+                if name == "落雪" and isinstance(exc, InvalidPlayerIdentifierError)
+            ),
+            None,
+        )
+
+    def replace_failure(result, name: str, exc: Exception):
+        """把失败列表中指定目标的异常替换为定文案（其他目标结果不动）。"""
+        duration, skipped, lx_note, names, failures = result
+        failures = [(n, exc if n == name else e) for n, e in failures]
+        return duration, skipped, lx_note, names, failures
 
     try:
-        return await attempt()
+        result = await attempt()
     except InvalidPlayerIdentifierError as exc:
-        # 水鱼凭据失效同抛此异常且 maimai_py 异常无 provider 标识：优先读
-        # updater 链内挂到异常上的报错目标名（FAIL_TARGET_ATTR）；无标签时
-        # 退回按目标装配判定——落雪不在目标内必然不是落雪失效。两者均非
-        # 落雪则立即上抛，不白等续期退避（handler 的 token 无效文案本就对）。
+        # 整链失败：水鱼凭据失效同抛此异常且 maimai_py 异常无 provider 标识，
+        # 优先读 updater 链内挂到异常上的报错目标名（FAIL_TARGET_ATTR）；无
+        # 标签时退回按目标装配判定——落雪不在目标内必然不是落雪失效。
+        # 两者均非落雪则立即上抛，不白等续期退避（handler 的 token 无效
+        # 文案本就对）。
         fail_name = getattr(exc, FAIL_TARGET_ATTR, None)
         if fail_name is not None and fail_name != "落雪":
             raise
@@ -257,7 +317,21 @@ async def _run_with_refresh(
             raise ImportFailed("落雪授权已过期，请重新绑定落雪") from exc
         if status != "refreshed":
             raise
-    last = None
+        result = None
+    else:
+        fail = lx_auth_failure(result[4])
+        if fail is None:
+            return result
+        status = await binding_service.refresh_lxns(binding)
+        if status == "dead":
+            return replace_failure(
+                result, "落雪", ImportFailed("落雪授权已过期，请重新绑定落雪")
+            )
+        if status != "refreshed":
+            return result
+    # 落雪续期阶梯（refreshed 已确认）：新令牌生效有短延迟，5s/10s 两级
+    # 退避重试；进入 10s 档时触发慢查询提示（整链/部分失败两态共用）
+    last: InvalidPlayerIdentifierError | None = None
     notified = False
     for delay in (5, 10):
         if delay >= 10 and notify_slow is not None and not notified:
@@ -269,10 +343,19 @@ async def _run_with_refresh(
         await asyncio.sleep(delay)
         logger.info("落雪 access_token 已续期，重试传分")
         try:
-            return await attempt()
+            result = await attempt()
         except InvalidPlayerIdentifierError as exc:
             last = exc
-    raise ImportFailed("落雪数据暂时未能同步，请一分钟后再试") from last
+            continue
+        if lx_auth_failure(result[4]) is None:
+            return result  # 落雪已救回；水鱼侧部分失败（若有）保留随返回
+        last = lx_auth_failure(result[4])
+    # 阶梯耗尽：部分失败态把落雪失败项改记「暂时未能同步」随返回；整链态
+    # （阶梯内仍全失败上抛）保持 ImportFailed 上抛由 handler 映射
+    exhausted = ImportFailed("落雪数据暂时未能同步，请一分钟后再试")
+    if result is not None:
+        return replace_failure(result, "落雪", exhausted)
+    raise exhausted from last
 
 
 @update_cmd.handle()
@@ -300,7 +383,7 @@ async def _(
 
     binding = await binding_service.get(platform, user_id)
     has_df = binding is not None and bool(
-        binding.divingfish_import_token or binding_service.divingfish_subject(binding)
+        binding.divingfish_import_token or binding.divingfish_oauth
     )
     if binding is None or not (has_df or binding.lxns_token):
         msg = (
@@ -388,7 +471,7 @@ async def _(
 
         try:
             # skipped 仅服务端统计口径，删除曲静默跳过、不向用户提示
-            duration, _skipped, lx_note, names = await _run_with_refresh(
+            duration, _skipped, lx_note, names, failures = await _run_with_refresh(
                 binding,
                 source,
                 qrcode,
@@ -419,17 +502,31 @@ async def _(
         await wechat_store.set_last_update(
             platform, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
-        target_str = "和".join(names)
+        # 部分成功语义：failures 非空 = 至少一站成功 + 若干站失败（全失败在
+        # updater 层已上抛走上面的整链映射）。成功目标照常报喜，失败目标逐
+        # 一给出可行动原因（水鱼写权限引导授权等），lx_note 追加在最后。
+        failed_names = {name for name, _ in failures}
+        ok_names = [n for n in names if n not in failed_names]
+        target_str = "和".join(ok_names)
+        fail_lines = "".join(
+            f"\n· {name}没导上去喵：{_failure_hint(name, exc)}"
+            if special
+            else f"\n· {name}未导出：{_failure_hint(name, exc)}"
+            for name, exc in failures
+        )
         if special:
+            # 彩蛋部分失败：以「导出来了，但...」开头列失败项，报喜段照旧
+            head = ("导出来了，但..." + fail_lines + "\n") if failures else ""
             msg = (
-                f"导到{target_str}了喵！\n你这次导了{duration:.2f}秒，很厉害了喵~\n"
+                head
+                + f"导到{target_str}了喵！\n你这次导了{duration:.2f}秒，很厉害了喵~\n"
                 f"怎么导的：{'好好的导' if qrcode else '简单的导'}"
             )
         else:
             msg = (
                 f"上传分数至{target_str}成功！\n本次上传用时{duration:.2f}秒\n"
                 f"上传方式：{'全量上传' if qrcode else '简略上传'}"
-            )
+            ) + fail_lines
         if lx_note:
             msg += f"\n{lx_note}"
         await UniMessage.text(f" {msg}").finish(at_sender=True)

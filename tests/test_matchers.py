@@ -221,7 +221,7 @@ async def test_simple_update_flow(app: App, stores, monkeypatch):
     ):
         assert full is False
         assert len(target) == 2  # 水鱼 + 落雪
-        return 1.23, 0
+        return 1.23, 0, []
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     # ensure_loaded 在无预热环境会死等 _ready：流程编排测试直接旁路
@@ -345,7 +345,7 @@ async def test_lxns_readonly_jwt_with_df_still_exports(app: App, stores, monkeyp
     ):
         assert len(target) == 1  # 仅水鱼
         assert target[0][2]["name"] == "水鱼"
-        return 0.5, 0
+        return 0.5, 0, []
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     await _bind_token(df="a" * 128)
@@ -397,7 +397,7 @@ async def test_lxns_writable_jwt_exports(app: App, stores, monkeypatch):
     ):
         assert len(target) == 2  # 水鱼 + 落雪
         assert target[1][2]["name"] == "落雪"
-        return 0.8, 0
+        return 0.8, 0, []
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     await _bind_token(df="a" * 128)
@@ -495,7 +495,7 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
         calls.append([kw["name"] for _, _, kw in target])
         if len(calls) == 1:
             raise InvalidPlayerIdentifierError("Unauthorized")
-        return 1.0, 0
+        return 1.0, 0, []
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     await _bind_wechat("888")
@@ -608,7 +608,7 @@ async def test_help_fallback_two_images(app: App, stores, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_with_refresh_ladder_and_copies(monkeypatch):
-    """续期成功后 5s/20s 两级退避阶梯（Q43）：成功路径、全败兜底文案、
+    """续期成功后 5s/10s 两级退避阶梯（Q43）：成功路径、全败兜底文案、
     dead 重绑文案、skip 原样上抛（如水鱼 Import-Token 失效）。"""
     import asyncio
 
@@ -641,7 +641,7 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
             calls["n"] += 1
             if calls["n"] <= n_fail:
                 raise InvalidPlayerIdentifierError("unauthorized")
-            return 1.0, 0
+            return 1.0, 0, []
 
         monkeypatch.setattr(asyncio, "sleep", fake_sleep)
         monkeypatch.setattr(binding_service, "refresh_lxns", fake_refresh)
@@ -651,7 +651,7 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
     # 5s 后成功
     sleeps, calls = await setup("refreshed", 1)
     result = await matchers._run_with_refresh(binding, [], None, False)
-    assert result == (1.0, 0, None, ["落雪"])
+    assert result == (1.0, 0, None, ["落雪"], [])
     assert calls["n"] == 2
     assert sleeps == [5]
 
@@ -663,7 +663,7 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
 
     sleeps, calls = await setup("refreshed", 2)
     result = await matchers._run_with_refresh(binding, [], None, False, notify_slow)
-    assert result == (1.0, 0, None, ["落雪"])
+    assert result == (1.0, 0, None, ["落雪"], [])
     assert calls["n"] == 3
     assert sleeps == [5, 10]
     assert len(notices) == 1
@@ -798,7 +798,7 @@ async def test_update_cmd_busy_reply_when_locked(app: App, stores, monkeypatch):
 
     async def fake_run_update(*args, **kwargs):
         called["n"] += 1
-        return 1.0, 0
+        return 1.0, 0, []
 
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
     await _bind_token(df="a" * 128)
@@ -872,3 +872,290 @@ async def test_pc_list_no_data_hint(app: App, stores, monkeypatch):
         "暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数",
         private=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_build_targets_df_credential_kinds(monkeypatch):
+    """水鱼导分凭据判定（2026-09-28 修复）：仅 QQ 号可派生的 ref subject 是
+    公开标识，不再单独构成导分凭据——Hoshino 迁移的「仅 QQ」行（consent 至多
+    只读、普遍缺失）不再装配注定失败的水鱼目标拖死整链；OAuth consent 标志
+    或 Import-Token 才是显式凭据。"""
+    from nonebot_plugin_awmc_helper.config import plugin_config
+    from nonebot_plugin_awmc_helper.core.store import UserBinding
+
+    from nonebot_plugin_awmc_score_updater.matchers import _build_targets
+
+    monkeypatch.setattr(plugin_config, "awmc_divingfish_oauth_client_id", "cid")
+    monkeypatch.setattr(plugin_config, "awmc_divingfish_oauth_client_secret", "sec")
+
+    # 仅 QQ（Hoshino 迁移行，service=lxns 场景同构）：无凭据无授权 → 不装
+    targets, note = _build_targets(
+        UserBinding(platform="OneBot V11", user_id="449099602", service="lxns")
+    )
+    assert [kw["name"] for _, _, kw in targets] == []
+    assert note is None
+
+    # 仅 Import-Token：照装
+    targets, _ = _build_targets(
+        UserBinding(
+            platform="OneBot V11", user_id="1", divingfish_import_token="a" * 128
+        )
+    )
+    assert [kw["name"] for _, _, kw in targets] == ["水鱼"]
+    assert targets[0][1].credentials == "a" * 128
+
+    # OAuth consent 标志：subject 装配（ref: 摘要）
+    targets, _ = _build_targets(
+        UserBinding(platform="OneBot V11", user_id="1", divingfish_oauth=True)
+    )
+    assert targets[0][1].credentials.startswith("ref:")
+
+    # oauth + token：consent 优先（subject 换票含写权限，token 写已被水鱼 500 拒绝）
+    targets, _ = _build_targets(
+        UserBinding(
+            platform="OneBot V11",
+            user_id="1",
+            divingfish_oauth=True,
+            divingfish_import_token="a" * 128,
+        )
+    )
+    assert targets[0][1].credentials.startswith("ref:")
+
+
+async def test_qq_only_binding_rejected(app: App, stores):
+    """仅 QQ 号的迁移行（无 token 无 OAuth）→ 视为未绑定水鱼凭据，走「没绑
+    数据站」引导（修复前派生 subject 被当凭据放行，导分必败于换票）。"""
+    from fake import fake_private_message_event_v11
+    from sqlmodel.ext.asyncio.session import AsyncSession
+    from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async with AsyncSession(get_engine()) as session:
+        session.add(
+            UserBinding(platform="OneBot V11", user_id="12345678", service="divingfish")
+        )
+        await session.commit()
+
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    await _send(
+        app,
+        matchers.update_cmd,
+        event,
+        "没绑数据站你怎么导。。。先对我说“导帮助”看看怎么绑定喵",
+        private=True,
+    )
+
+
+async def _prepare_partial_failure_env(app, monkeypatch, fake_run_update):
+    """部分失败用例公共前置：绑定齐备 + SaltNet 拉取 mock + 传分打桩。"""
+    from fake import fake_private_message_event_v11
+    from nonebot_plugin_awmc_helper.core.songs import song_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async def fake_ensure():
+        return None
+
+    monkeypatch.setattr(song_service, "ensure_loaded", fake_ensure)
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    await _bind_token(df="a" * 128, lx="b" * 32)
+    await _bind_wechat("888")
+    respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(200, json={"userMusicList": []})
+    )
+    return fake_private_message_event_v11
+
+
+@respx.mock
+async def test_partial_failure_special_reply(app: App, stores, monkeypatch):
+    """部分失败彩蛋文案：「导出来了，但...」+ 失败项原因 + 成功目标照常报喜
+    （水鱼写权限缺失不再拖死落雪——落雪成绩正常导出并展示）。"""
+    from maimai_py.exceptions import PlayerNotAuthorizedError
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        assert [kw["name"] for _, _, kw in target] == ["水鱼", "落雪"]
+        return 1.0, 0, [("水鱼", PlayerNotAuthorizedError("consent required"))]
+
+    event_factory = await _prepare_partial_failure_env(
+        app, monkeypatch, fake_run_update
+    )
+    event = event_factory(message="导", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "导出来了，但...\n"
+                        "· 水鱼没导上去喵：水鱼已要求成绩写入走 OAuth 授权，"
+                        "请发送「绑定水鱼」完成一次授权\n"
+                        "导到落雪了喵！\n你这次导了1.00秒，很厉害了喵~\n怎么导的：简单的导"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+
+
+@respx.mock
+async def test_partial_failure_plain_reply(app: App, stores, monkeypatch):
+    """部分失败普通文案（「传分」指令，非彩蛋）：成功目标照报，失败项以
+    「未导出」列出原因。"""
+    from maimai_py.exceptions import PlayerNotAuthorizedError
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        return 1.0, 0, [("水鱼", PlayerNotAuthorizedError("consent required"))]
+
+    event_factory = await _prepare_partial_failure_env(
+        app, monkeypatch, fake_run_update
+    )
+    event = event_factory(message="传分", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("正在上传分数，请稍等...")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "上传分数至落雪成功！\n本次上传用时1.00秒\n"
+                        "上传方式：简略上传\n"
+                        "· 水鱼未导出：水鱼已要求成绩写入走 OAuth 授权，"
+                        "请发送「绑定水鱼」完成一次授权"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_with_refresh_partial_lxns_401_renewed(monkeypatch):
+    """部分失败续期（新路径）：他站成功 + 落雪 401 进失败列表 → 续期后重试
+    成功，落雪从失败列表消失，水鱼失败保留随返回。"""
+    import asyncio
+
+    from maimai_py.exceptions import (
+        PlayerNotAuthorizedError,
+        InvalidPlayerIdentifierError,
+    )
+    from nonebot_plugin_awmc_helper.core.store import UserBinding
+    from nonebot_plugin_awmc_helper.core.binding import binding_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    binding = UserBinding(
+        platform="OneBot V11",
+        user_id="30004",
+        divingfish_import_token="a" * 128,
+        lxns_token="b" * 32,
+    )
+
+    sleeps: list[float] = []
+    refresh_calls: list = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    async def fake_refresh(b):
+        refresh_calls.append(1)
+        return "refreshed"
+
+    calls = {"n": 0}
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 1.0, 0, [("落雪", InvalidPlayerIdentifierError("Unauthorized"))]
+        return 2.0, 0, [("水鱼", PlayerNotAuthorizedError("consent required"))]
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(binding_service, "refresh_lxns", fake_refresh)
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+
+    duration, _skipped, _lx_note, names, failures = await matchers._run_with_refresh(
+        binding, [], None, False
+    )
+    assert duration == 2.0
+    assert names == ["水鱼", "落雪"]
+    assert [n for n, _ in failures] == ["水鱼"]  # 落雪已救回、水鱼失败保留
+    assert sleeps == [5]
+    assert len(refresh_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_with_refresh_partial_lxns_dead_rebind_hint(monkeypatch):
+    """部分失败 + 续期 dead（rt 已过期）：落雪失败项改记重绑文案随返回，
+    不抛整链异常（他站成功结果不受影响）。"""
+    import asyncio
+
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+    from nonebot_plugin_awmc_helper.core.store import UserBinding
+    from nonebot_plugin_awmc_helper.core.binding import binding_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    binding = UserBinding(
+        platform="OneBot V11",
+        user_id="30005",
+        divingfish_import_token="a" * 128,
+        lxns_token="b" * 32,
+    )
+
+    async def fake_sleep(delay):
+        raise AssertionError("dead 不进退避阶梯")
+
+    async def fake_refresh(b):
+        return "dead"
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        return 1.0, 0, [("落雪", InvalidPlayerIdentifierError("Unauthorized"))]
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(binding_service, "refresh_lxns", fake_refresh)
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+
+    duration, _skipped, _lx_note, _names, failures = await matchers._run_with_refresh(
+        binding, [], None, False
+    )
+    assert duration == 1.0
+    assert [n for n, _ in failures] == ["落雪"]
+    assert isinstance(failures[0][1], matchers.ImportFailed)
+    assert "重新绑定落雪" in str(failures[0][1])

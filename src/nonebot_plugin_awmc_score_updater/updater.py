@@ -260,7 +260,7 @@ async def delta_updates_chain(
     target_gather_callback: ChainCallback | None = None,
     target_update_callback: ChainCallback | None = None,
     compare_target: bool = True,
-) -> tuple[int, list[Score], list[dict[str, Score]]]:
+) -> tuple[int, list[Score], list[dict[str, Score]], list[tuple[str, Exception]]]:
     """增量/全量版 ``MaimaiClient.updates_chain``（裸成绩版）。
 
     ``compare_target=True``：源成绩与目标已有成绩比较后仅上传增量；
@@ -269,10 +269,15 @@ async def delta_updates_chain(
     扩展，同样会除零，2026-09-26 起弃用）。
 
     返回 (因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数 + 落雪预
-    过滤剔除数, 源成绩快照, 各数据站基线字典列表)。源成绩为机台真值
-    （_compare 原地合并前的独立拷贝）、基线为上传前的数据站状态，二者供游玩
-    次数观测（store.observe）比对；基线列表可能为空（全量模式 / 目标
-    拉取全败，此时桥接无基准）。
+    过滤剔除数, 源成绩快照, 各数据站基线字典列表, 失败目标列表)。源成绩为
+    机台真值（_compare 原地合并前的独立拷贝）、基线为上传前的数据站状态，
+    二者供游玩次数观测（store.observe）比对；基线列表可能为空（全量模式 /
+    目标拉取全败，此时桥接无基准）。
+
+    部分成功语义（2026-09-28）：单目标上传失败不再上抛拖死整链——他站已
+    写入的成绩不能因某一站（典型：水鱼写权限缺失）失败而白费。失败目标以
+    (目标名, 异常) 收集返回，异常实例自带 FAIL_TARGET_ATTR 归属标签；**全部**
+    目标失败仍上抛第一个异常，保持调用方的整链错误映射路径。
 
     目标 provider 必须同时支持拉取（IScoreProvider）与上传（IScoreUpdateProvider）。
     """
@@ -381,10 +386,18 @@ async def delta_updates_chain(
             upload_tasks.clear()
             await _schedule_upload(filtered)
             results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-    for r in results:
-        if isinstance(r, Exception):
-            raise r
-    return skipped_unknown + prefilter_dropped, source_scores, target_dicts
+
+    # 部分成功语义：失败目标收集返回（异常自带归属标签）；全失败仍上抛，
+    # 由调用方既有映射给出整链错误文案
+    failures: list[tuple[str, Exception]] = [
+        (getattr(r, FAIL_TARGET_ATTR, "?"), r)
+        for r in results
+        if isinstance(r, Exception)
+    ]
+    total_targets = sum(1 for _, ident, _ in target if ident is not None)
+    if failures and len(failures) >= total_targets:
+        raise failures[0][1]
+    return skipped_unknown + prefilter_dropped, source_scores, target_dicts, failures
 
 
 async def run_update(
@@ -398,11 +411,14 @@ async def run_update(
     max_retries: int = 3,
     gather_log_name: str = "salt",
     pc_hook: PCHook | None = None,
-) -> tuple[float, int]:
+) -> tuple[float, int, list[tuple[str, Exception]]]:
     """执行一次传分：全量（跳过目标比对）或增量（与目标比对只传提升）。
 
     失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
-    映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数)。
+    映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数, 失败目标
+    列表)。目标部分失败（至少一个站成功）不算链路失败：直接随返回值交出
+    （写权限缺失等确定性失败重试无益），pc_hook 照常触发（观测按各站已有
+    基线桥接，缺一站只是漏计不虚增）；全部目标失败/源失败仍上抛走重试。
 
     ``pc_hook``：游玩次数观测钩子，链路成功后以 (源成绩快照, 数据站基线)
     恰好调用一次（重试轮次只在成功那轮触发，不会重复计数）；钩子异常只
@@ -449,7 +465,7 @@ async def run_update(
     for attempt in range(max_retries + 1):
         skipped = 0
         try:
-            skipped, source_scores, target_dicts = await delta_updates_chain(
+            skipped, source_scores, target_dicts, failures = await delta_updates_chain(
                 client,
                 source,
                 target,
@@ -465,7 +481,7 @@ async def run_update(
                     await pc_hook(source_scores, target_dicts)
                 except Exception:
                     logger.warning("游玩次数观测失败（不影响本次导分）")
-            return time.monotonic() - start, skipped
+            return time.monotonic() - start, skipped, failures
         except Exception as e:  # 统一退避重试后交给调用方
             last_exc = e
             if attempt >= max_retries:

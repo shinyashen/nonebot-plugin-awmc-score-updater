@@ -242,11 +242,12 @@ async def test_run_update_retries_then_succeeds(songs):
         (FlakyProvider("m", "f"), PlayerIdentifier(credentials="x"), {"name": "s"})
     ]
     targets = [(flaky_target, PlayerIdentifier(credentials="t"), {"name": "t"})]
-    duration, skipped = await run_update(
+    duration, skipped, failures = await run_update(
         client, source, targets, full=False, max_retries=2
     )
     assert duration >= 0
     assert skipped == 0
+    assert failures == []
     assert call_count["n"] == 2
 
 
@@ -424,9 +425,10 @@ async def test_delta_chain_prefilter_allowed_ids(songs):
         )
     ]
 
-    skipped, _, _ = await delta_updates_chain(client, src, targets)
+    skipped, _, _, failures = await delta_updates_chain(client, src, targets)
 
     assert skipped == 1
+    assert failures == []
     assert [(s.id, s.type.name) for s in target.updates[0]] == [(231, "DX")]
 
 
@@ -474,9 +476,10 @@ async def test_run_update_prefilters_lxns_target(songs):
         post = m.post(url__regex=r".*/api/v0/user/maimai/player/scores$").respond(
             200, json={"success": True, "code": 200, "data": []}
         )
-        _, skipped = await run_update(client, src, targets, full=False)
+        _, skipped, failures = await run_update(client, src, targets, full=False)
 
     assert skipped == 1
+    assert failures == []
     body = _json.loads(post.calls.last.request.content)
     assert [s["id"] for s in body["scores"]] == [231]
 
@@ -533,7 +536,9 @@ async def test_delta_chain_snapshot_is_true_copy(songs):
     src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
     targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
 
-    _skipped, snapshot, _dicts = await delta_updates_chain(client, src, targets)
+    _skipped, snapshot, _dicts, _failures = await delta_updates_chain(
+        client, src, targets
+    )
 
     assert snapshot[0].fc is None  # 机台真值：合并借用的 FCP 不进快照
     assert snapshot[0].play_count == 1  # 机台真值：基线 pc=5 不取大进快照
@@ -622,11 +627,12 @@ async def test_run_update_pc_hook_failure_swallowed(songs):
     async def boom(source_scores, target_dicts):
         raise RuntimeError("hook failed")
 
-    duration, skipped = await run_update(
+    duration, skipped, failures = await run_update(
         client, src, targets, full=False, max_retries=0, pc_hook=boom
     )
     assert duration >= 0
     assert skipped == 0
+    assert failures == []
     assert len(target.updates) == 1
 
 
@@ -649,3 +655,80 @@ async def test_run_update_pc_hook_not_called_on_failure(songs):
     with pytest.raises(RuntimeError, match="update failed"):
         await run_update(client, src, targets, full=False, max_retries=1, pc_hook=hook)
     assert calls == []
+
+
+async def test_delta_chain_partial_failure_collected(songs):
+    """部分成功语义（2026-09-28）：单目标失败不上抛拖死整链——失败目标
+    收集进返回值（异常自带归属标签），他站照常收到上传。"""
+
+    from nonebot_plugin_awmc_score_updater.updater import (
+        FAIL_TARGET_ATTR,
+        delta_updates_chain,
+    )
+
+    client = await _make_client()
+    source = FakeUpdateProvider([mk_score()])
+    failed = FakeUpdateProvider(update_fail=True)
+    ok = FakeUpdateProvider([])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (failed, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (ok, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+
+    skipped, _, _, failures = await delta_updates_chain(client, src, targets)
+
+    assert skipped == 0
+    assert len(failures) == 1
+    name, exc = failures[0]
+    assert name == "水鱼"
+    assert isinstance(exc, RuntimeError)
+    assert getattr(exc, FAIL_TARGET_ATTR, None) == "水鱼"
+    assert len(ok.updates) == 1  # 他站成功结果不受失败目标影响
+
+
+async def test_delta_chain_all_targets_fail_raises(songs):
+    """全部目标失败仍上抛第一个异常（保持调用方整链错误映射路径）。"""
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider([mk_score()])
+    failed_a = FakeUpdateProvider(update_fail=True)
+    failed_b = FakeUpdateProvider(update_fail=True)
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (failed_a, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (failed_b, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+
+    with pytest.raises(RuntimeError, match="update failed"):
+        await delta_updates_chain(client, src, targets)
+
+
+async def test_run_update_partial_failure_returns_failures(songs):
+    """run_update 层：部分失败直接返回失败列表（不触发指数退避重试），
+    pc_hook 照常触发（观测按各站已有基线桥接，缺一站只是漏计不虚增）。"""
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    failed = FakeUpdateProvider(update_fail=True)
+    ok = FakeUpdateProvider([])
+    source = FakeUpdateProvider([mk_score()])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (failed, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (ok, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+    hook_calls: list = []
+
+    async def hook(source_scores, target_dicts):
+        hook_calls.append(target_dicts)
+
+    duration, skipped, failures = await run_update(
+        client, src, targets, full=False, max_retries=3, pc_hook=hook
+    )
+    assert duration >= 0
+    assert skipped == 0
+    assert [name for name, _ in failures] == ["水鱼"]
+    assert len(hook_calls) == 1
+    assert len(ok.updates) == 1
