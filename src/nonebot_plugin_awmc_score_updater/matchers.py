@@ -262,6 +262,10 @@ async def _run_with_refresh(
     部分失败原样保留（如水鱼 Import-Token 失效文案本就准确）。
     """
 
+    # 落雪 token 过期预检（Q43）：导分前 JWT exp 已过/临近就先续期，省掉
+    # 写端点上的必败 401 首跳；best-effort，失败走下方 401 驱动链路
+    await binding_service.preflight_lxns(binding)
+
     async def attempt():
         targets, lx_note = _build_targets(binding)
         duration, skipped, failures = await run_update(
