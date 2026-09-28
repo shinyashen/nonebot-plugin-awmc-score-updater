@@ -1,0 +1,4 @@
+# typos 误报豁免：maimai_py 序列化函数名（_ser_score/_deser_score）中的
+# "ser" 是上游 API 名，非 "set" 拼写错误。
+[default.extend-words]
+ser = "ser"
