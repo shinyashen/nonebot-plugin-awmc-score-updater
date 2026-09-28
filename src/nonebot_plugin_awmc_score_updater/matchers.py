@@ -31,7 +31,12 @@ from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from maimai_py.providers.lxns import is_jwt
 from nonebot_plugin_alconna.uniseg import UniMessage
-from nonebot_plugin_awmc_helper.core.score import UserScoreError, score_service
+from nonebot_plugin_awmc_helper.constants import DEFAULT_THEME
+from nonebot_plugin_awmc_helper.core.score import (
+    UserScoreError,
+    build_bests,
+    score_service,
+)
 from nonebot_plugin_awmc_helper.core.utils import (
     parse_page,
     slow_notice,
@@ -50,6 +55,7 @@ from nonebot_plugin_awmc_helper.core.binding import (
 from nonebot_plugin_awmc_helper.core.forward import try_send_forward
 from nonebot_plugin_awmc_helper.core.render.score import DrawScore, score_list_height
 from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to_bytes
+from nonebot_plugin_awmc_helper.core.render.best50 import best50_bytes
 
 from .store import wechat_store, play_count_store
 from .config import plugin_config
@@ -65,6 +71,7 @@ HELP_SECTIONS = [
     "· 带二维码 = 全量上传（仅私聊或白名单群），并校准游玩次数\n"
     "· 13pc列表 / 13.0pc列表：游玩次数排行（标级/定数前缀与\n"
     "  分数列表同口径，支持页码）\n"
+    "· pc50：游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）\n"
     "· 「导」字开头的指令有专属回复喵",
     "绑定机台账号（仅私聊）：\n"
     "绑定微信/bindwx <SGWCMAID.../https...>\n"
@@ -108,6 +115,7 @@ pc_list_cmd = on_regex(
     r"^([0-9]+(?:\.[0-9]+)?\+?)\s?pc列表\s?([0-9]+)?$",
     block=True,
 )
+pc50_cmd = on_command("pc50", aliases={"PC50"}, block=True)
 
 
 """落雪 OAuth access_token（JWT）形态判定复用 maimai-py 单源。
@@ -641,5 +649,80 @@ async def _(
         real,
         end_page,
         sub_of=lambda s: f"pc: {pc_of(s)}",
+    )
+    await UniMessage.image(raw=png).finish(at_sender=True)
+
+
+def _display_name(player) -> str:
+    """卡片显示名：水鱼 Player.name 是账号用户名，展示用昵称（主插件同款）。"""
+    return getattr(player, "nickname", None) or player.name
+
+
+@pc50_cmd.handle()
+@handle_errors("查询失败", except_with_message=(UserScoreError,))
+async def _(
+    session: Session = UniSession(),
+):
+    """pc50：游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）。
+
+    行为**谱面**粒度：一个谱面只对应一个难度，排序键 = 该谱面自身的 pc
+    （平手比达成率，与 13pc列表 同口径），全难度谱面同池竞争；35/15 版本
+    拆分走主插件公共 build_bests，副行经 sub_of 钩子显示 pc（同 13pc列表
+    格式）。pc 表值为 0 的种子行（导分桥接未知次数）不入榜。头部 rating
+    三数字沿用模板占位口径（所列成绩 RA 之和，与 ap50 一致）。数据要求同
+    pc列表：NET 数据源被 _guard_cn 拦截，且需先「导」过（有次数）。
+    """
+    platform, user_id = session_keys(session)
+    wb = await wechat_store.get(platform, user_id)
+    if wb is None or not wb.arcade_user_id:
+        await UniMessage.text(" 尚未绑定微信二维码，暂无游玩次数数据").finish(
+            at_sender=True
+        )
+    pc_map = {
+        (r.music_id, r.type, r.level_index): r.play_count
+        for r in await play_count_store.counts(wb.arcade_user_id)
+    }
+    if not pc_map:
+        await UniMessage.text(
+            " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+        ).finish(at_sender=True)
+
+    binding = await binding_service.ensure(platform, user_id)
+    scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
+    rows = [
+        s
+        for s in scores.scores
+        if pc_map.get((s.id, s.type.value, s.level_index.value), 0) > 0
+    ]
+    if not rows:
+        await UniMessage.text(
+            " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+        ).finish(at_sender=True)
+    bests = build_bests(
+        rows,
+        key=lambda s: (
+            pc_map[(s.id, s.type.value, s.level_index.value)],
+            s.achievements or 0,
+        ),
+    )
+
+    if await play_count_store.last_full_at(wb.arcade_user_id) is None:
+        await UniMessage.text(
+            " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
+        ).send(at_sender=True)
+
+    player = await score_service.get_player(binding, notify_slow=slow_notice())
+    png = await best50_bytes(
+        _display_name(player),
+        bests.rating,
+        bests.rating_b35,
+        bests.rating_b15,
+        bests.scores_b35,
+        bests.scores_b15,
+        player=player,
+        qqid=binding_service.qq_of(binding),
+        service=binding.service,
+        theme=binding.theme or DEFAULT_THEME,
+        sub_of=lambda s: f"pc: {pc_map[(s.id, s.type.value, s.level_index.value)]}",
     )
     await UniMessage.image(raw=png).finish(at_sender=True)

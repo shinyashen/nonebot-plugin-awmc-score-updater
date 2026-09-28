@@ -1162,3 +1162,195 @@ async def test_run_with_refresh_partial_lxns_dead_rebind_hint(monkeypatch):
     assert [n for n, _ in failures] == ["落雪"]
     assert isinstance(failures[0][1], matchers.ImportFailed)
     assert "重新绑定落雪" in str(failures[0][1])
+
+
+def _mk_ext(
+    song_id: int,
+    *,
+    typ=None,
+    li=None,
+    ach: float = 99.5,
+    version: int = 22000,
+    ra: int = 200,
+):
+    """构造 ScoreExtend（pc50 聚合/渲染输入；默认 DX/MASTER）。"""
+    from dataclasses import asdict
+
+    from maimai_py import Score, RateType, SongType, LevelIndex, ScoreExtend
+
+    base = Score(
+        id=song_id,
+        level="13",
+        level_index=li or LevelIndex.MASTER,
+        achievements=ach,
+        fc=None,
+        fs=None,
+        dx_score=2000,
+        dx_rating=ra,
+        play_count=None,
+        play_time=None,
+        rate=RateType.SSS,
+        type=typ or SongType.DX,
+    )
+    return ScoreExtend(
+        **asdict(base),
+        title=f"s{song_id}",
+        level_value=13.0,
+        level_dx_score=3000,
+        dx_star=None,
+        version=version,
+    )
+
+
+def _mk_pc(song_id: int, pc: int, *, typ=None, li=None):
+    """构造 play_count 载荷的 Score（锚定校准用）。"""
+    from maimai_py import Score, SongType, LevelIndex
+
+    return Score(
+        id=song_id,
+        level=None,
+        level_index=li or LevelIndex.MASTER,
+        achievements=100.0,
+        fc=None,
+        fs=None,
+        dx_score=0,
+        dx_rating=None,
+        play_count=pc,
+        play_time=None,
+        rate=None,
+        type=typ or SongType.DX,
+    )
+
+
+async def test_pc50_unbound_wechat_hint(app: App, stores):
+    """pc50：未绑微信 → 引导文案（不拉成绩）。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    await _bind_token(df="a" * 128)
+    event = fake_private_message_event_v11(message="pc50", user_id=12345678, to_me=True)
+    await _send(
+        app,
+        matchers.pc50_cmd,
+        event,
+        "尚未绑定微信二维码，暂无游玩次数数据",
+        private=True,
+    )
+
+
+async def test_pc50_no_data_hint(app: App, stores):
+    """pc50：已绑微信但无次数 → 引导先导分。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+    event = fake_private_message_event_v11(message="pc50", user_id=12345678, to_me=True)
+    await _send(
+        app,
+        matchers.pc50_cmd,
+        event,
+        "暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数",
+        private=True,
+    )
+
+
+async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
+    """pc50 全链路（谱面粒度）：每谱面一行、按自身 pc 降序 → build_bests 拆
+    旧 35/新 15 → B50 版式（副行 pc 钩子同 13pc列表；头部 rating 为所列成绩
+    RA 之和；pc=0 种子行与无 pc 行不入榜；已校准不发提示）。"""
+    from types import SimpleNamespace
+    from base64 import b64encode as b64
+
+    import nonebot
+    from fake import fake_private_message_event_v11
+    from maimai_py import SongType, current_version
+    from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+    from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+    from nonebot_plugin_awmc_score_updater import matchers
+    from nonebot_plugin_awmc_score_updater.store import play_count_store
+
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+
+    current = current_version.value
+    rows = [
+        # 曲 231（旧版本）：DX 3 次、SD 1 次——各自独立成行
+        _mk_ext(10231, version=current - 1, ra=150),
+        _mk_ext(231, typ=SongType.STANDARD, version=current - 1, ach=98.0, ra=120),
+        # 曲 500（新版本）：5 次
+        _mk_ext(500, version=current, ra=300),
+        # 曲 700（旧版本）：9 次 → 全场第一
+        _mk_ext(700, version=current - 1, ra=100),
+        # 曲 800（新版本）：pc=0 种子行 → 不入榜
+        _mk_ext(800, version=current, ra=999),
+        # 曲 900（旧版本）：pc 表无行 → 不入榜
+        _mk_ext(900, version=current - 1, ra=999),
+    ]
+
+    async def fake_get_scores_all(binding, notify_slow=None):
+        return SimpleNamespace(scores=rows)
+
+    async def fake_get_player(binding, notify_slow=None):
+        return SimpleNamespace(name="acct", nickname="nick")
+
+    monkeypatch.setattr(
+        matchers,
+        "score_service",
+        SimpleNamespace(get_scores_all=fake_get_scores_all, get_player=fake_get_player),
+    )
+    captured = {}
+
+    async def fake_best50_bytes(player_name, rating, rb35, rb15, b35, b15, **kw):
+        captured.update(
+            name=player_name,
+            rating=rating,
+            rb35=rb35,
+            rb15=rb15,
+            b35=b35,
+            b15=b15,
+            kw=kw,
+        )
+        return b"png"
+
+    monkeypatch.setattr(matchers, "best50_bytes", fake_best50_bytes)
+
+    # 锚定校准：全量 pc 真值入表（last_full_at 置位 → 不发校准提示）
+    await play_count_store.observe(
+        "888",
+        [
+            _mk_pc(10231, 3),
+            _mk_pc(231, 1, typ=SongType.STANDARD),
+            _mk_pc(500, 5),
+            _mk_pc(700, 9),
+            _mk_pc(800, 0),
+        ],
+        [],
+        anchored=True,
+    )
+
+    event = fake_private_message_event_v11(message="pc50", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.pc50_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.image(f"base64://{b64(b'png').decode()}")]),
+            result=None,
+            bot=bot,
+        )
+
+    assert captured["name"] == "nick"
+    assert [s.id for s in captured["b35"]] == [700, 10231, 231]  # pc 9>3>1 降序
+    assert [s.id for s in captured["b15"]] == [500]
+    # 头部 rating = 所列成绩 RA 之和（模板占位口径）
+    assert captured["rating"] == 100 + 150 + 120 + 300
+    assert captured["rb35"] == 370
+    assert captured["rb15"] == 300
+    sub_of = captured["kw"]["sub_of"]
+    assert sub_of(captured["b35"][0]) == "pc: 9"  # 曲 700
+    assert sub_of(captured["b35"][1]) == "pc: 3"  # 曲 231 DX 谱面自身 pc
+    assert sub_of(captured["b35"][2]) == "pc: 1"  # 曲 231 SD 谱面自身 pc
