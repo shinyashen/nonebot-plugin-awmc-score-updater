@@ -8,7 +8,6 @@
 去主插件指令。
 """
 
-import re
 import json
 import base64
 import asyncio
@@ -29,6 +28,7 @@ from maimai_py.exceptions import (
 )
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
+from maimai_py.providers.lxns import is_jwt
 from nonebot_plugin_alconna.uniseg import UniMessage
 from nonebot_plugin_awmc_helper.core.score import UserScoreError, score_service
 from nonebot_plugin_awmc_helper.core.utils import (
@@ -108,8 +108,7 @@ pc_list_cmd = on_regex(
 )
 
 
-_LXNS_JWT_RE = re.compile(r"^[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+$")
-"""与 maimai-py is_jwt 同源：落雪 OAuth access_token（JWT）形态。
+"""落雪 OAuth access_token（JWT）形态判定复用 maimai-py 单源。
 
 注意不能以「是否 JWT」判断可写性——重绑后的新授权 token 同样是 JWT，
 需解码 payload 的 scope 声明确认（access_token 仅 15 分钟有效，主插件
@@ -129,7 +128,7 @@ def _lxns_writable(token: str) -> bool:
     个人 API 密钥（非 JWT）恒可写；JWT 解码 payload 的 scope 判断是否含
     ``write_player``；解码失败按可写处理（交由运行时 401 文案兜底）。
     """
-    if not _LXNS_JWT_RE.match(token):
+    if not is_jwt.match(token):
         return True
     try:
         payload = token.split(".")[1]
