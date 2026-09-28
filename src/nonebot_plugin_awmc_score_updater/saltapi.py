@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 from maimai_py.enums import FCType, FSType, RateType, SongType, LevelIndex
 from maimai_py.models import Score
-from nonebot_plugin_awmc_helper.core.http import build_smart_transport
+from nonebot_plugin_awmc_helper.core.http import create_smart_client
 
 _client: httpx.AsyncClient | None = None
 
@@ -33,12 +33,9 @@ def get_client() -> httpx.AsyncClient:
     """SaltNet 直连共享客户端（懒创建，代理传输与主插件 ext 层同源）。"""
     global _client
     if _client is None:
-        verify = _lenient_verify()
-        _client = httpx.AsyncClient(
+        _client = create_smart_client(
             timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
-            follow_redirects=True,
-            verify=verify,
-            transport=build_smart_transport(verify=verify),
+            verify=_lenient_verify(),
         )
     return _client
 
@@ -78,7 +75,10 @@ async def parse_qrcode(qr_code: str, *, main_url: str, fallback_url: str) -> str
             continue
         data = resp.json()
         if data.get("errorID") == 0:
-            return str(data.get("userID"))
+            user_id = data.get("userID")
+            # errorID=0 但缺 userID（网关异常响应）：按业务失败返回 None，
+            # 不能 str(None) 绑成 "None" 字符串落库
+            return str(user_id) if user_id is not None else None
         return None
     raise SaltApiError("二维码解析服务暂不可用，请稍后再试")
 
