@@ -504,6 +504,43 @@ async def test_run_update_pc_hook_called_once_with_snapshot(songs):
     assert next(iter(dicts[0].values())).achievements == 99.0  # 上传前基线
 
 
+async def test_delta_chain_snapshot_is_true_copy(songs):
+    """源成绩快照须为真拷贝（F5）：_compare 原地合并目标基准值（fc 借用、
+    play_count 取大），浅拷贝列表与源对象同引用，快照会被合并污染——
+    观测到的不再是机台真值。"""
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(
+                song_id=231,
+                achievements=100.0,
+                dx_score=2500,
+                fc=None,
+                fs=None,
+                play_count=1,
+            )
+        ]
+    )
+    target = FakeUpdateProvider(
+        [
+            mk_score(
+                achievements=99.0, dx_score=2000, fc=FCType.FCP, fs=None, play_count=5
+            )
+        ]
+    )
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
+
+    _skipped, snapshot, _dicts = await delta_updates_chain(client, src, targets)
+
+    assert snapshot[0].fc is None  # 机台真值：合并借用的 FCP 不进快照
+    assert snapshot[0].play_count == 1  # 机台真值：基线 pc=5 不取大进快照
+    # 上传载荷仍是合并后的（跨目标补达成情况的语义不变）
+    assert target.updates[0][0].fc == FCType.FCP
+
+
 async def test_run_update_pc_hook_full_mode_no_baseline(songs):
     """全量模式：不拉目标 → 基线为空列表（扫码锚定不依赖基线）。"""
     from nonebot_plugin_awmc_score_updater.updater import run_update

@@ -20,6 +20,7 @@ import time
 import asyncio
 import hashlib
 from typing import Any
+from dataclasses import replace
 from collections.abc import Callable, Iterable, Awaitable
 
 from maimai_py import LXNSProvider, MaimaiClient
@@ -233,7 +234,7 @@ async def delta_updates_chain(
 
     返回 (因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数 + 落雪预
     过滤剔除数, 源成绩快照, 各数据站基线字典列表)。源成绩为机台真值
-    （_compare 原地合并前快照）、基线为上传前的数据站状态，二者供游玩
+    （_compare 原地合并前的独立拷贝）、基线为上传前的数据站状态，二者供游玩
     次数观测（store.observe）比对；基线列表可能为空（全量模式 / 目标
     拉取全败，此时桥接无基准）。
 
@@ -254,9 +255,9 @@ async def delta_updates_chain(
         for score in scores:
             key = f"{score.id} {score.type} {score.level_index}"
             source_scores_unique[key] = score._join(source_scores_unique.get(key, None))
-    # PC 观测用源成绩快照：必须在 _compare 之前取——_compare 会原地合并
-    # 目标基准值，合并后的成绩不再反映机台真值
-    source_scores = list(source_scores_unique.values())
+    # PC 观测用源成绩快照：必须在 _compare 之前取且须真拷贝——_compare 原地
+    # 合并目标基准值，浅拷贝列表仍引用同一 Score 对象，快照会被污染失真
+    source_scores = [replace(s) for s in source_scores_unique.values()]
 
     # 目标成绩拉取并取交集合并（_join_rev：保守基准）
     target_dicts: list[dict[str, Score]] = []
