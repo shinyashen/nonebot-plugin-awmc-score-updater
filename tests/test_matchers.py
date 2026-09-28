@@ -691,6 +691,43 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
     assert sleeps == []
 
 
+@pytest.mark.asyncio
+async def test_update_cmd_busy_reply_when_locked(app: App, stores, monkeypatch):
+    """同一用户并发「导」互斥（F6）：锁占用时快速回复进行中，
+    不再并发拉取/上传（双份成绩、桥接游玩次数双计、observe 撞主键）。"""
+    import asyncio
+
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    lock = asyncio.Lock()
+    await lock.acquire()
+    matchers._import_locks[("OneBot V11", "12345678")] = lock
+
+    called = {"n": 0}
+
+    async def fake_run_update(*args, **kwargs):
+        called["n"] += 1
+        return 1.0, 0
+
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    await _send(
+        app,
+        matchers.update_cmd,
+        event,
+        "上一次导分还在进行中，请稍等完成后再试",
+        private=True,
+    )
+    assert called["n"] == 0
+    # 清理模块级锁表，避免污染其他用例
+    matchers._import_locks.pop(("OneBot V11", "12345678"), None)
+    lock.release()
+
+
 async def test_pc_list_unbound_wechat_hint(app: App, stores, monkeypatch):
     """pc列表：已绑数据站但未绑微信 → 引导文案（NET/成绩拉取不触网）。"""
     from types import SimpleNamespace

@@ -139,7 +139,9 @@ def _lxns_writable(token: str) -> bool:
     return _LXNS_WRITE_SCOPE in str(claims.get("scope", ""))
 
 
-def _build_targets(binding) -> tuple[
+def _build_targets(
+    binding,
+) -> tuple[
     list[tuple[IScoreUpdateProvider, PlayerIdentifier | None, dict[str, Any]]],
     str | None,
 ]:
@@ -200,6 +202,12 @@ async def _resolve_qrcode(text: str) -> tuple[str, str]:
 
 class ImportFailed(Exception):
     """导分失败的准确用户文案（handle_errors 直接展示 message）。"""
+
+
+_import_locks: dict[tuple[str, str], asyncio.Lock] = {}
+"""按 (platform, user_id) 的导分互斥锁：同一用户并发「导」会各自按同一旧
+基线判增量（双份拉取/上传）、桥接游玩次数双计、observe 撞主键被吞。锁表
+按真实用户键增长，进程内有界，不回收。"""
 
 
 async def _run_with_refresh(
@@ -283,8 +291,7 @@ async def _(
 
     binding = await binding_service.get(platform, user_id)
     has_df = binding is not None and bool(
-        binding.divingfish_import_token
-        or binding_service.divingfish_subject(binding)
+        binding.divingfish_import_token or binding_service.divingfish_subject(binding)
     )
     if binding is None or not (has_df or binding.lxns_token):
         msg = (
@@ -307,105 +314,116 @@ async def _(
         )
         await UniMessage.text(f" {msg}").finish(at_sender=True)
 
-    qrcode: str | None = None
-    if qr_input:
-        qr, arcade_user_id = await _resolve_qrcode(qr_input)
-        if arcade_user_id != wb.arcade_user_id:
-            msg = (
-                "怎么，还想帮别人导一导？"
-                if special
-                else "你提供的二维码所对应账号与已绑定的账号不匹配，请检查后重新输入"
-            )
-            await UniMessage.text(f" {msg}").finish(at_sender=True)
-        qrcode = qr
-
-    if wb.last_update:
-        hint = (
-            f"\n你上次啥时候导的: {wb.last_update}"
-            if special
-            else f"\n最近上传时间: {wb.last_update}"
-        )
-    else:
-        hint = ""
-    prefix = "推分了？你先别急" if special else "正在上传分数，请稍等..."
-    await UniMessage.text(f"{prefix}{hint}").send(at_sender=True)
-
-    # 水鱼/落雪 update_scores 内部会经 maimai-py client.songs() 取曲库：
-    # 必须等主插件曲库预热完成（缓存已填），否则重启后立即导分会触发
-    # 现场全量重建，超过请求超时（2026-09-26 线上 ReadTimeout 实测根因）
-    from nonebot_plugin_awmc_helper.core.songs import song_service
-
-    await song_service.ensure_loaded()
-
-    source = [
-        (
-            SaltArcadeProvider(
-                plugin_config.awmc_su_salt_api_url,
-                plugin_config.awmc_su_salt_api_fallback_url,
-            ),
-            SaltArcadeProvider.make_identifier(wb.arcade_user_id, qrcode),
-            {"name": "机台"},
-        )
-    ]
-
-    async def notify_slow():
-        await UniMessage.text(" 比预期时间要长，再稍等一下…").send(at_sender=True)
-
-    # 游玩次数观测：链路成功后恰好调用一次（扫码全量=权威替换，简略=桥接）
-    async def pc_hook(source_scores, target_dicts):
-        await play_count_store.observe(
-            wb.arcade_user_id,
-            source_scores,
-            target_dicts,
-            anchored=bool(qrcode),
-        )
-
-    try:
-        # skipped 仅服务端统计口径，删除曲静默跳过、不向用户提示
-        duration, _skipped, lx_note, names = await _run_with_refresh(
-            binding,
-            source,
-            qrcode,
-            full=bool(qrcode),
-            notify_slow=notify_slow,
-            pc_hook=pc_hook,
-        )
-    except InvalidPlayerIdentifierError:
-        await UniMessage.text(
-            " 成绩导入 token 无效，请到主插件重新绑定水鱼/落雪 token"
-        ).finish(at_sender=True)
-    except PlayerNotAuthorizedError:
-        await UniMessage.text(
-            " 水鱼已要求所有成绩写入走 OAuth 授权："
-            "请发送「绑定水鱼」完成一次授权后重试"
-        ).finish(at_sender=True)
-    except PrivacyLimitationError:
-        await UniMessage.text(" 你没有同意数据站的相关用户协议，无法完成该操作").finish(
+    # 互斥覆盖二维码探测 → 上传 → 游玩次数观测 → 最近时间落库全程；
+    # 进行中的第二次指令快速回复而非静默排队（FinishedException 穿过
+    # async with 释放锁，无泄漏路径）
+    lock = _import_locks.setdefault((platform, user_id), asyncio.Lock())
+    if lock.locked():
+        await UniMessage.text(" 上一次导分还在进行中，请稍等完成后再试").finish(
             at_sender=True
         )
-    except InvalidJsonError:
-        # 数据站返回非 JSON（500 HTML 等）：多见于凌晨维护窗口，服务端问题非本插件故障
-        await UniMessage.text(
-            " 数据站服务暂时不可用（可能维护中），成绩可能已部分上传，请稍后再试"
-        ).finish(at_sender=True)
+    async with lock:
+        qrcode: str | None = None
+        if qr_input:
+            qr, arcade_user_id = await _resolve_qrcode(qr_input)
+            if arcade_user_id != wb.arcade_user_id:
+                msg = (
+                    "怎么，还想帮别人导一导？"
+                    if special
+                    else "你提供的二维码所对应账号与已绑定的账号不匹配，"
+                    "请检查后重新输入"
+                )
+                await UniMessage.text(f" {msg}").finish(at_sender=True)
+            qrcode = qr
 
-    await wechat_store.set_last_update(
-        platform, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
-    target_str = "和".join(names)
-    if special:
-        msg = (
-            f"导到{target_str}了喵！\n你这次导了{duration:.2f}秒，很厉害了喵~\n"
-            f"怎么导的：{'好好的导' if qrcode else '简单的导'}"
+        if wb.last_update:
+            hint = (
+                f"\n你上次啥时候导的: {wb.last_update}"
+                if special
+                else f"\n最近上传时间: {wb.last_update}"
+            )
+        else:
+            hint = ""
+        prefix = "推分了？你先别急" if special else "正在上传分数，请稍等..."
+        await UniMessage.text(f"{prefix}{hint}").send(at_sender=True)
+
+        # 水鱼/落雪 update_scores 内部会经 maimai-py client.songs() 取曲库：
+        # 必须等主插件曲库预热完成（缓存已填），否则重启后立即导分会触发
+        # 现场全量重建，超过请求超时（2026-09-26 线上 ReadTimeout 实测根因）
+        from nonebot_plugin_awmc_helper.core.songs import song_service
+
+        await song_service.ensure_loaded()
+
+        source = [
+            (
+                SaltArcadeProvider(
+                    plugin_config.awmc_su_salt_api_url,
+                    plugin_config.awmc_su_salt_api_fallback_url,
+                ),
+                SaltArcadeProvider.make_identifier(wb.arcade_user_id, qrcode),
+                {"name": "机台"},
+            )
+        ]
+
+        async def notify_slow():
+            await UniMessage.text(" 比预期时间要长，再稍等一下…").send(at_sender=True)
+
+        # 游玩次数观测：链路成功后恰好调用一次（扫码全量=权威替换，简略=桥接）
+        async def pc_hook(source_scores, target_dicts):
+            await play_count_store.observe(
+                wb.arcade_user_id,
+                source_scores,
+                target_dicts,
+                anchored=bool(qrcode),
+            )
+
+        try:
+            # skipped 仅服务端统计口径，删除曲静默跳过、不向用户提示
+            duration, _skipped, lx_note, names = await _run_with_refresh(
+                binding,
+                source,
+                qrcode,
+                full=bool(qrcode),
+                notify_slow=notify_slow,
+                pc_hook=pc_hook,
+            )
+        except InvalidPlayerIdentifierError:
+            await UniMessage.text(
+                " 成绩导入 token 无效，请到主插件重新绑定水鱼/落雪 token"
+            ).finish(at_sender=True)
+        except PlayerNotAuthorizedError:
+            await UniMessage.text(
+                " 水鱼已要求所有成绩写入走 OAuth 授权："
+                "请发送「绑定水鱼」完成一次授权后重试"
+            ).finish(at_sender=True)
+        except PrivacyLimitationError:
+            await UniMessage.text(
+                " 你没有同意数据站的相关用户协议，无法完成该操作"
+            ).finish(at_sender=True)
+        except InvalidJsonError:
+            # 数据站返回非 JSON（500 HTML 等）：多见于凌晨维护窗口，
+            # 服务端问题非本插件故障
+            await UniMessage.text(
+                " 数据站服务暂时不可用（可能维护中），成绩可能已部分上传，请稍后再试"
+            ).finish(at_sender=True)
+
+        await wechat_store.set_last_update(
+            platform, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
-    else:
-        msg = (
-            f"上传分数至{target_str}成功！\n本次上传用时{duration:.2f}秒\n"
-            f"上传方式：{'全量上传' if qrcode else '简略上传'}"
-        )
-    if lx_note:
-        msg += f"\n{lx_note}"
-    await UniMessage.text(f" {msg}").finish(at_sender=True)
+        target_str = "和".join(names)
+        if special:
+            msg = (
+                f"导到{target_str}了喵！\n你这次导了{duration:.2f}秒，很厉害了喵~\n"
+                f"怎么导的：{'好好的导' if qrcode else '简单的导'}"
+            )
+        else:
+            msg = (
+                f"上传分数至{target_str}成功！\n本次上传用时{duration:.2f}秒\n"
+                f"上传方式：{'全量上传' if qrcode else '简略上传'}"
+            )
+        if lx_note:
+            msg += f"\n{lx_note}"
+        await UniMessage.text(f" {msg}").finish(at_sender=True)
 
 
 @help_cmd.handle()
