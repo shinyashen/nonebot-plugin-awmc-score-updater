@@ -1,4 +1,8 @@
-"""SaltNet 直连层测试（respx mock）。插件相关导入一律函数内进行。"""
+"""SaltNet 直连层测试（respx mock）。插件相关导入一律函数内进行。
+
+成绩明细 musicId 锚定真实曲（机台 id 空间）：199 チルノのパーフェクトさんすう教室
+（SD=199、DX MASTER=10199、蛸宴=100199）与 624 KISS CANDY FLAVOR（SD）。
+"""
 
 import respx
 import pytest
@@ -81,8 +85,9 @@ async def test_parse_qrcode_all_down():
 
 
 def _detail(
-    music_id: int, level: int = 4, achievement: int = 1005000, combo: int = 0
+    music_id: int, level: int = 3, achievement: int = 1005000, combo: int = 0
 ) -> dict:
+    """SaltNet 成绩明细（level 默认 3=MASTER：锚定的 199/10199/624 均有 MASTER 谱）。"""
     return {
         "musicId": music_id,
         "level": level,
@@ -99,8 +104,8 @@ async def test_fetch_score_payload_flatten():
 
     payload = {
         "userMusicList": [
-            {"userMusicDetailList": [_detail(200, combo=1), _detail(10001)]},
-            {"userMusicDetailList": [_detail(300)]},
+            {"userMusicDetailList": [_detail(199, combo=1), _detail(10199)]},
+            {"userMusicDetailList": [_detail(624)]},
         ]
     }
     respx.post(f"{MAIN}/updateUser").mock(return_value=Response(200, json=payload))
@@ -128,8 +133,9 @@ async def test_fetch_score_payload_with_qrcode_sends_field():
 def test_deser_score_standard():
     from nonebot_plugin_awmc_score_updater.saltapi import deser_score
 
-    score = deser_score(_detail(200, achievement=1005000, combo=1))
-    assert score.id == 200
+    # 199 SD（机台 musicId = 根 id）
+    score = deser_score(_detail(199, achievement=1005000, combo=1))
+    assert score.id == 199
     assert score.type.name == "STANDARD"
     assert score.achievements == 100.5
     assert score.fc is not None
@@ -140,16 +146,18 @@ def test_deser_score_standard():
 def test_deser_score_dx_folds_id():
     from nonebot_plugin_awmc_score_updater.saltapi import deser_score
 
-    score = deser_score(_detail(10001))
-    assert score.id == 1
+    # 真实折根对：199 DX MASTER 机台 musicId = 10199（根 199 + 10000）
+    score = deser_score(_detail(10199))
+    assert score.id == 199
     assert score.type.name == "DX"
 
 
 def test_deser_score_utage_keeps_id_and_level0():
     from nonebot_plugin_awmc_score_updater.saltapi import deser_score
 
-    score = deser_score(_detail(100231, level=10))
-    assert score.id == 100231
+    # 蛸チルノ（100199，真实 6 位宴谱机台 id）保留不折根
+    score = deser_score(_detail(100199, level=10))
+    assert score.id == 100199
     assert score.level_index.value == 0  # 宴谱恒取 LevelIndex(0)
 
 
@@ -157,7 +165,7 @@ def test_deser_score_app_theoretical():
     from nonebot_plugin_awmc_score_updater.saltapi import deser_score
 
     # comboStatus=0 且达成率 101.0000% → APP（理论值）
-    score = deser_score(_detail(200, achievement=1010000))
+    score = deser_score(_detail(199, achievement=1010000))
     assert score.achievements == 101.0
     assert score.fc is not None
     assert score.fc.name == "APP"
@@ -167,7 +175,7 @@ def test_deser_score_play_count_mapped():
     """扫码全量载荷：playCount 真值映射进 Score.play_count。"""
     from nonebot_plugin_awmc_score_updater.saltapi import deser_score
 
-    raw = {**_detail(200), "playCount": 42}
+    raw = {**_detail(199), "playCount": 42}
     assert deser_score(raw).play_count == 42
 
 
@@ -175,5 +183,5 @@ def test_deser_score_play_count_null_and_absent():
     """简略载荷 playCount 恒 null（或缺失）→ None。"""
     from nonebot_plugin_awmc_score_updater.saltapi import deser_score
 
-    assert deser_score({**_detail(200), "playCount": None}).play_count is None
-    assert deser_score(_detail(200)).play_count is None
+    assert deser_score({**_detail(199), "playCount": None}).play_count is None
+    assert deser_score(_detail(199)).play_count is None

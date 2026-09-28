@@ -27,7 +27,7 @@ async def songs():
 
 
 def mk_score(
-    song_id: int = 231,
+    song_id: int = 199,
     achievements: float = 100.0,
     dx_score: int = 2000,
     fc: FCType | None = FCType.FC,
@@ -36,7 +36,7 @@ def mk_score(
     song_type: SongType = SongType.DX,
     play_count: int = 1,
 ) -> Score:
-    """样例成绩：默认 231 的 DX MASTER（样例曲库中存在）。"""
+    """样例成绩：默认 199 チルノのパーフェクトさんすう教室 的 DX MASTER（真实谱面）。"""
     return Score(
         id=song_id,
         level=None,
@@ -155,10 +155,16 @@ async def test_delta_chain_uploads_only_delta(songs):
 
     client = await _make_client()
     source_scores = [
-        mk_score(song_id=231, achievements=100.0, dx_score=2500),  # 有提升
-        mk_score(song_id=500, achievements=90.0, dx_score=100),  # 无提升
+        mk_score(song_id=199, achievements=100.0, dx_score=2500),  # 有提升
+        # 624 KISS CANDY FLAVOR 仅 SD 谱（无提升）
         mk_score(
-            song_id=231,
+            song_id=624,
+            achievements=90.0,
+            dx_score=100,
+            song_type=SongType.STANDARD,
+        ),
+        mk_score(
+            song_id=199,
             achievements=95.0,
             dx_score=500,
             level_index=LevelIndex.EXPERT,
@@ -168,8 +174,13 @@ async def test_delta_chain_uploads_only_delta(songs):
     source = FakeUpdateProvider(source_scores)
     target = FakeUpdateProvider(
         [
-            mk_score(song_id=231, achievements=99.0, dx_score=2000),
-            mk_score(song_id=500, achievements=99.9, dx_score=3000),
+            mk_score(song_id=199, achievements=99.0, dx_score=2000),
+            mk_score(
+                song_id=624,
+                achievements=99.9,
+                dx_score=3000,
+                song_type=SongType.STANDARD,
+            ),
         ]
     )
     src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
@@ -179,7 +190,7 @@ async def test_delta_chain_uploads_only_delta(songs):
 
     assert len(target.updates) == 1
     uploaded = sorted((s.id, s.type.name) for s in target.updates[0])
-    assert uploaded == [(231, "DX"), (231, "STANDARD")]  # 仅新增与有提升者
+    assert uploaded == [(199, "DX"), (199, "STANDARD")]  # 仅新增与有提升者
 
 
 async def test_delta_chain_utage_score_passes(songs):
@@ -188,7 +199,8 @@ async def test_delta_chain_utage_score_passes(songs):
     回归保护（2026-09-26 线上实测）：旧链路经 ``MaimaiScores.configure``
     扩展，按谱面物量算 dx_star——零物量宴谱（如缺数据的 [匿]匿名M）触发
     ``dx_score / 0`` 崩掉整条导分链。现链路只消费裸 ``Score``，宴谱成绩
-    不再要求曲库能映射到谱面（不注入任何宴谱曲目也照常上传）。
+    不再要求曲库能映射到谱面。锚 121634 = [協]青春コンプレックス（真实，
+    2026-08-07 下架，样例曲库不含该宴体）——曲库无此宴谱也照常上传。
     """
     from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
 
@@ -196,7 +208,7 @@ async def test_delta_chain_utage_score_passes(songs):
     source = FakeUpdateProvider(
         [
             mk_score(
-                song_id=100001,
+                song_id=121634,
                 song_type=SongType.UTAGE,
                 level_index=LevelIndex.BASIC,
             )
@@ -209,7 +221,7 @@ async def test_delta_chain_utage_score_passes(songs):
     await delta_updates_chain(client, src, targets)
 
     assert len(target.updates) == 1
-    assert [s.id for s in target.updates[0]] == [100001]
+    assert [s.id for s in target.updates[0]] == [121634]
 
 
 async def test_delta_chain_source_failure_propagates(songs):
@@ -256,13 +268,13 @@ async def test_run_update_full_chain(songs):
 
     client = await _make_client()
     target = FakeUpdateProvider()
-    source_provider = FakeUpdateProvider([mk_score(song_id=231)])
+    source_provider = FakeUpdateProvider([mk_score(song_id=199)])
     source = [(source_provider, PlayerIdentifier(credentials="x"), {"name": "s"})]
     targets = [(target, PlayerIdentifier(credentials="t"), {"name": "t"})]
     await run_update(client, source, targets, full=True, max_retries=0)
     # 全量上传：不拉取目标、不比较，源合并成绩原样上传
     assert len(target.updates) == 1
-    assert [s.id for s in target.updates[0]] == [231]
+    assert [s.id for s in target.updates[0]] == [199]
     assert target.fetch_count == 0
 
 
@@ -283,7 +295,8 @@ async def test_salt_provider_filters_deleted_songs(songs):
     """SaltNet 源过滤：删除曲/未收录曲（曲库无）在源头剔除。
 
     用户实测：SaltNet 保留删除曲残留成绩，水鱼 update_records 收到未收录
-    曲目 id 返回 500（2026-09-26）。
+    曲目 id 返回 500（2026-09-26）。下架锚：青春コンプレックス（根 1634，
+    2026-08-07 国服下架），其 DX 谱机台 musicId = 11634。
     """
     import respx
 
@@ -291,7 +304,7 @@ async def test_salt_provider_filters_deleted_songs(songs):
 
     detail = {
         "musicId": 0,
-        "level": 4,
+        "level": 3,
         "achievement": 1005000,
         "comboStatus": 0,
         "syncStatus": 0,
@@ -308,7 +321,7 @@ async def test_salt_provider_filters_deleted_songs(songs):
     respx.post("https://salt_api_main.realtvop.top/updateUser").mock(
         return_value=Response(
             200,
-            json={"userMusicList": [{"userMusicDetailList": rows([231, 999999])}]},
+            json={"userMusicList": [{"userMusicDetailList": rows([199, 11634])}]},
         )
     )
     provider = SaltArcadeProvider("https://salt_api_main.realtvop.top", "fallback")
@@ -317,8 +330,8 @@ async def test_salt_provider_filters_deleted_songs(songs):
         None,  # type: ignore[arg-type]——曲库过滤走主插件 song_service，client 未用
     )
     assert [s.id for s in got] == [
-        231
-    ]  # 999999 曲库无（999999 % 10000 = 9999 不存在）→ 剔除
+        199
+    ]  # 11634 折根 1634：真实下架曲不在样例曲库 → 剔除
 
 
 async def test_salt_provider_requires_userid():
@@ -348,7 +361,7 @@ async def test_delta_chain_borrows_better_fc_fs_from_targets(songs):
     source = FakeUpdateProvider(
         [
             mk_score(
-                song_id=231,
+                song_id=199,
                 achievements=100.0,
                 dx_score=2500,
                 fc=None,
@@ -404,9 +417,10 @@ async def test_delta_chain_prefilter_allowed_ids(songs):
     client = await _make_client()
     source = FakeUpdateProvider(
         [
-            mk_score(song_id=231, achievements=100.0, dx_score=2500),
+            mk_score(song_id=199, achievements=100.0, dx_score=2500),
+            # [協]青春コンプレックス宴体（真实下架限时谱，落雪曲库无原型场景）
             mk_score(
-                song_id=111222,
+                song_id=121634,
                 song_type=SongType.UTAGE,
                 achievements=96.0,
                 dx_score=0,
@@ -414,14 +428,14 @@ async def test_delta_chain_prefilter_allowed_ids(songs):
         ]
     )
     target = FakeUpdateProvider(
-        [mk_score(song_id=231, achievements=99.0, dx_score=2000)]
+        [mk_score(song_id=199, achievements=99.0, dx_score=2000)]
     )
     src = [(source, PlayerIdentifier(credentials="x"), {"name": "s"})]
     targets = [
         (
             target,
             PlayerIdentifier(credentials="t"),
-            {"name": "落雪", "allowed_ids": {231}},
+            {"name": "落雪", "allowed_ids": {199}},
         )
     ]
 
@@ -429,12 +443,12 @@ async def test_delta_chain_prefilter_allowed_ids(songs):
 
     assert skipped == 1
     assert failures == []
-    assert [(s.id, s.type.name) for s in target.updates[0]] == [(231, "DX")]
+    assert [(s.id, s.type.name) for s in target.updates[0]] == [(199, "DX")]
 
 
 async def test_run_update_prefilters_lxns_target(songs):
-    """run_update 对落雪目标按其当前曲库列表预过滤：列表只含 231 → 源里
-    500 的提升被剔除（skipped=1），上传载荷只带 231（列表拉取经 respx）。"""
+    """run_update 对落雪目标按其当前曲库列表预过滤：列表只含 199 → 源里
+    624 的提升被剔除（skipped=1），上传载荷只带 199（列表拉取经 respx）。"""
     import json as _json
 
     from respx import mock as respx_mock
@@ -450,8 +464,14 @@ async def test_run_update_prefilters_lxns_target(songs):
     client = await _make_client()
     source = FakeUpdateProvider(
         [
-            mk_score(song_id=231, achievements=100.0, dx_score=2500),
-            mk_score(song_id=500, achievements=100.0, dx_score=2500),
+            mk_score(song_id=199, achievements=100.0, dx_score=2500),
+            # 624 仅 SD 谱
+            mk_score(
+                song_id=624,
+                achievements=100.0,
+                dx_score=2500,
+                song_type=SongType.STANDARD,
+            ),
         ]
     )
     src = [(source, SaltArcadeProvider.make_identifier("42"), {"name": "机台"})]
@@ -468,7 +488,7 @@ async def test_run_update_prefilters_lxns_target(songs):
             200, json={"success": True, "data": {"access_token": "t"}}
         )
         m.get(url__regex=r".*/api/v0/maimai/song/list.*").respond(
-            200, json={"success": True, "data": {"songs": [{"id": 231}]}}
+            200, json={"success": True, "data": {"songs": [{"id": 199}]}}
         )
         m.get(url__regex=r".*/api/v0/user/maimai/player/scores$").respond(
             200, json={"success": True, "code": 200, "data": []}
@@ -481,7 +501,7 @@ async def test_run_update_prefilters_lxns_target(songs):
     assert skipped == 1
     assert failures == []
     body = _json.loads(post.calls.last.request.content)
-    assert [s["id"] for s in body["scores"]] == [231]
+    assert [s["id"] for s in body["scores"]] == [199]
 
 
 async def test_run_update_pc_hook_called_once_with_snapshot(songs):
@@ -517,7 +537,7 @@ async def test_delta_chain_snapshot_is_true_copy(songs):
     source = FakeUpdateProvider(
         [
             mk_score(
-                song_id=231,
+                song_id=199,
                 achievements=100.0,
                 dx_score=2500,
                 fc=None,
