@@ -243,6 +243,11 @@ async def _run_with_refresh(
     try:
         return await attempt()
     except InvalidPlayerIdentifierError as exc:
+        # 水鱼凭据失效同抛此异常：落雪不在本次目标内时不得进续期路径，
+        # 否则白等两级退避后误报「落雪数据暂时未能同步」（异常无 provider
+        # 标识，只能按目标装配判定归属）
+        if "落雪" not in [kw["name"] for _, _, kw in _build_targets(binding)[0]]:
+            raise
         status = await binding_service.refresh_lxns(binding)
         if status == "dead":
             raise ImportFailed("落雪授权已过期，请重新绑定落雪") from exc
