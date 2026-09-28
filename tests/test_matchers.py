@@ -16,9 +16,11 @@ SGWCMAID = "SGWCMAID" + "0" * (84 - len("SGWCMAID"))
 
 
 @pytest.fixture
-async def stores(tmp_path, _isolate_store_db):
+async def stores(tmp_path):
     """主插件库与本插件库各自重定向到临时文件（每用例独立，结束后回落
-    worker 会话库——置 None 会落回生产路径，见 _isolate_store_db docstring）。"""
+    worker 会话文件——置 None 会落回 CWD 生产路径，见 conftest
+    after_nonebot_init 的 docstring）。"""
+    import conftest
     from nonebot_plugin_awmc_helper.core import store as awmc_store
 
     from nonebot_plugin_awmc_score_updater import store as su_store
@@ -28,8 +30,8 @@ async def stores(tmp_path, _isolate_store_db):
     su_store.set_db_file(tmp_path / "su.db")
     await su_store.init_store()
     yield
-    awmc_store.set_db_file(_isolate_store_db.awmc)
-    su_store.set_db_file(_isolate_store_db.su)
+    awmc_store.set_db_file(conftest._session_db["awmc"])
+    su_store.set_db_file(conftest._session_db["su"])
 
 
 async def _bind_token(df: str | None = None, lx: str | None = None) -> None:

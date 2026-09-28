@@ -15,12 +15,14 @@ score-updater wechat_binding/play_count 族），空表无行、无实际影响�
 跨仓不重名。
 """
 
+import sqlite3
 from pathlib import Path
 from datetime import datetime
 
 from pydantic import NaiveDatetime
 from sqlmodel import Field, SQLModel, select
 from nonebot.log import logger
+from sqlalchemy.exc import OperationalError as SAOperationalError
 from maimai_py.models import Score
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from nonebot_plugin_localstore import get_data_dir
@@ -55,9 +57,19 @@ def get_engine() -> AsyncEngine:
 
 
 async def init_store() -> None:
-    """建表（create_all 起步）。"""
-    async with get_engine().begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+    """建表（create_all 起步；字段变更时在此追加简易迁移）。
+
+    create_all 的存在性检查与 CREATE 之间存在竞态：多进程同时初始化同一个
+    库文件（如 pytest-xdist 共享 CWD 路径）时会收到 "table already exists"，
+    对 SQLite 而言即幂等成功，忽略之（对齐主插件 init_db，2026-09-28 CI
+    实测两 worker 并发首建同炸）。
+    """
+    try:
+        async with get_engine().begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+    except (SAOperationalError, sqlite3.OperationalError) as e:
+        if "already exists" not in str(e):
+            raise
 
 
 class WechatBinding(SQLModel, table=True):

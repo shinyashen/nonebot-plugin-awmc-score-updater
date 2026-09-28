@@ -19,14 +19,40 @@ def pytest_collection_modifyitems(items: list[pytest.Item]):
         async_test.add_marker(session_scope_marker, append=False)
 
 
+_session_db: dict[str, Path] = {}
+"""本 worker 会话级两仓 db 路径（after_nonebot_init 填充；stores fixture
+teardown 回落用——置 None 会落回 CWD 生产路径，见 after_nonebot_init）。"""
+
+
 @pytest.fixture(scope="session", autouse=True)
-async def after_nonebot_init(after_nonebot_init: None):
+async def after_nonebot_init(after_nonebot_init: None, tmp_path_factory, worker_id):
     # 加载适配器
     driver = nonebot.get_driver()
     driver.register_adapter(OnebotV11Adapter)
 
     # 加载插件（[tool.nonebot]：本插件 require 主插件自动加载）
     nonebot.load_from_toml("pyproject.toml")
+
+    # 两仓 db 钉到 per-worker 唯一临时文件。必须在**这里**做（依赖链保证
+    # 先于 nonebug_init 的 lifespan startup，即第一次建表之前）：本插件
+    # on_startup(init_store) 与主插件 on_startup(init_db) 随 lifespan 触发，
+    # _db_file 为 None 时打 CWD 生产路径（LOCALSTORE_USE_CWD=true）——
+    # xdist 各 worker 对同一文件并发 create_all，check 与 CREATE 交错即
+    # "table already exists"（2026-09-28 CI 实测；本地不复现因 data/ 踩着
+    # 开发残留库，表早已建好）。SQLModel 全局 metadata（两仓 store.py 共知
+    # 边界）使任一仓 create_all 连另一仓模型一起建，扩大了撞名面。
+    # 注意不能做成独立 autouse fixture：与 nonebug_init 并列无依赖，顺序
+    # 未定义（实测 lifespan 可先跑）。init_db 有 already-exists 容错、
+    # init_store（9938cc8 起）同款，双保险。
+    from nonebot_plugin_awmc_helper.core import store as awmc_store
+
+    from nonebot_plugin_awmc_score_updater import store as su_store
+
+    base = tmp_path_factory.mktemp(f"awmc-db-{worker_id}")
+    _session_db["su"] = base / "su.db"
+    _session_db["awmc"] = base / "awmc.db"
+    su_store.set_db_file(_session_db["su"])
+    awmc_store.set_db_file(_session_db["awmc"])
 
 
 @pytest.fixture(autouse=True)
@@ -49,37 +75,3 @@ async def _bypass_song_ensure_loaded(monkeypatch):
         return await client.songs()
 
     monkeypatch.setattr(song_service, "ensure_loaded", fake_ensure)
-
-
-@pytest.fixture(scope="session", autouse=True)
-async def _isolate_store_db(after_nonebot_init, tmp_path_factory, worker_id):
-    """两仓 db 钉到 per-worker 唯一临时文件并预建表（CI xdist 建表 race 修复）。
-
-    背景：两插件都有 ``on_startup`` 建表钩子（主插件 init_db、本插件
-    init_store），随 nonebug lifespan 在**每个测试**触发；``_db_file`` 为
-    None 时打生产 localstore 路径，且 SQLModel 全局 metadata（两仓 store.py
-    共知的边界）使任一仓 create_all 把另一仓已加载模型一并建出——CI xdist
-    多 worker 并发对同一 SQLite 文件建表，check 与 CREATE 交错即
-    ``table already exists``（2026-09-28 CI 实测，本地从未复现：本地生产
-    路径早有开发残留库，测试直接踩在上面）。
-
-    会话开始（插件模型注册完毕后）即对本 worker 独占的文件建表：跨 worker
-    路径互异消除并发，同 worker 内顺序执行本就无竞争；后续各 fixture 的
-    ``set_db_file`` 切换/回落都以 :class:`SimpleNamespace` 路径为准，不再
-    置 None（置 None = 落回生产路径 = race 回归）。
-    """
-    from types import SimpleNamespace
-
-    from nonebot_plugin_awmc_helper.core import store as awmc_store
-
-    from nonebot_plugin_awmc_score_updater import store as su_store
-
-    base = tmp_path_factory.mktemp(f"awmc-db-{worker_id}")
-    iso = SimpleNamespace(su=base / "su.db", awmc=base / "awmc.db")
-    awmc_store.set_db_file(iso.awmc)
-    await awmc_store.init_db()
-    su_store.set_db_file(iso.su)
-    await su_store.init_store()
-    yield iso
-    su_store.set_db_file(None)
-    awmc_store.set_db_file(None)

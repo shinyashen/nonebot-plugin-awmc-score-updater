@@ -10,12 +10,14 @@ from maimai_py.models import Score
 
 @pytest.fixture
 async def pc_store(tmp_path):
+    import conftest
+
     from nonebot_plugin_awmc_score_updater import store as su_store
 
     su_store.set_db_file(tmp_path / "pc.db")
     await su_store.init_store()
     yield su_store.play_count_store
-    su_store.set_db_file(None)
+    su_store.set_db_file(conftest._session_db["su"])
 
 
 def mk(
