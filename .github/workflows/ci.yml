@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Ruff check
+        run: uvx ruff check .
+      - name: Ruff format
+        run: uvx ruff format --check .
+
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: crate-ci/typos@master
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+          version: "latest"
+
+      # 主插件依赖走 directory source（../nonebot-plugin-awmc-helper）：
+      # CI 上先匿名 clone 主仓 master 到兄弟路径（uv.lock 锁定其构建）
+      - name: Checkout sibling main plugin
+        run: git clone --depth 1 https://github.com/shinyashen/nonebot-plugin-awmc-helper.git "$GITHUB_WORKSPACE/../nonebot-plugin-awmc-helper"
+
+      - name: Install Dependencies
+        run: uv sync --locked
+
+      - name: Run Pytest
+        run: uv run poe test
