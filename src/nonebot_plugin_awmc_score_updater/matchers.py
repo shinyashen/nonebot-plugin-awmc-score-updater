@@ -770,9 +770,10 @@ help_registry.declare_guide(
             ),
             GuideStep(
                 text=(
-                    "绑定水鱼（二选一：OAuth 授权 / Import-Token）。"
-                    "仅「绑定水鱼 <用户名>」公开查询档无法导分，"
-                    "水鱼现已强制写入走授权。"
+                    "绑定水鱼（OAuth 授权——写成绩的唯一途径）："
+                    "发「绑定水鱼」按引导完成设备码授权即可导分。\n"
+                    "Import-Token 仅剩读取基线价值（写入会失败并提示授权），"
+                    "需要全量成绩/牌子读取时才绑。"
                     "下图引导：水鱼查分器个人页 → 设置 → 生成 Import-Token"
                 ),
                 commands=("绑定水鱼", "绑定水鱼token"),
