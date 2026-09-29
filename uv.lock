@@ -1455,7 +1455,7 @@ wheels = [
 [[package]]
 name = "nonebot-plugin-awmc-helper"
 version = "0.1.0"
-source = { directory = "../nonebot-plugin-awmc-helper" }
+source = { editable = "../nonebot-plugin-awmc-helper" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "beautifulsoup4" },
@@ -1562,7 +1562,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
     { name = "maimai-py", specifier = ">=1.5.2" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.60.0,<1.0.0" },
-    { name = "nonebot-plugin-awmc-helper", directory = "../nonebot-plugin-awmc-helper" },
+    { name = "nonebot-plugin-awmc-helper", editable = "../nonebot-plugin-awmc-helper" },
     { name = "nonebot-plugin-localstore", specifier = ">=0.7.4,<1.0.0" },
     { name = "nonebot-plugin-uninfo", specifier = ">=0.10.0,<1.0.0" },
     { name = "nonebot2", specifier = ">=2.4.3,<3.0.0" },

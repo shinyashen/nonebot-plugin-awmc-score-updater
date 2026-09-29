@@ -1435,7 +1435,12 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     monkeypatch.setattr(
         matchers,
         "score_service",
-        SimpleNamespace(get_scores_all=fake_get_scores_all, get_player=fake_get_player),
+        SimpleNamespace(
+            get_scores_all=fake_get_scores_all,
+            get_player=fake_get_player,
+            view_of=lambda _s: "cn",
+            needs_fetch=lambda _b: False,
+        ),
     )
     captured = {}
 
@@ -1489,3 +1494,108 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     assert sub_of(captured["b35"][0]) == "pc: 9"  # 曲 8
     assert sub_of(captured["b35"][1]) == "pc: 3"  # 曲 199 SD 谱面自身 pc
     assert sub_of(captured["b35"][2]) == "pc: 1"  # 曲 624
+
+
+@pytest.mark.asyncio
+async def test_pc50_net_branch(app: App, stores, monkeypatch):
+    """pc50 NET 分支：抓取提示先行 → 日服现行版本分侧（27000 MAGiCAL 为
+    新版本侧下界）→ net_best50_card 身份卡（不触查分器 get_player）。"""
+    from types import SimpleNamespace
+    from base64 import b64encode as b64
+
+    import nonebot
+    from fake import fake_private_message_event_v11
+    from maimai_py import SongType
+    from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+    from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+    from sqlmodel.ext.asyncio.session import AsyncSession
+    from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
+
+    from nonebot_plugin_awmc_score_updater import matchers
+    from nonebot_plugin_awmc_score_updater.store import play_count_store
+
+    async with AsyncSession(get_engine()) as session:
+        session.add(
+            UserBinding(
+                platform="OneBot V11",
+                user_id="12345678",
+                service="net",
+                net_sega_id="sid",
+            )
+        )
+        await session.commit()
+    await _bind_wechat("888")
+
+    rows = [
+        _mk_ext(199, version=27000, ra=150),  # MAGiCAL → NET 口径新版本侧
+        _mk_ext(
+            199,
+            typ=SongType.STANDARD,
+            ach=98.0,
+            level_value=13.3,
+            version=12000,
+            ra=120,
+        ),
+        _mk_ext(
+            8,
+            typ=SongType.STANDARD,
+            level="12",
+            level_value=12.4,
+            version=10000,
+            ra=100,
+        ),
+    ]
+
+    async def fake_get_scores_all(binding, notify_slow=None):
+        return SimpleNamespace(scores=rows)
+
+    monkeypatch.setattr(
+        matchers,
+        "score_service",
+        SimpleNamespace(
+            get_scores_all=fake_get_scores_all,
+            view_of=lambda _s: "jp",
+            needs_fetch=lambda _b: True,
+        ),
+    )
+    captured = {}
+
+    async def fake_net_card(bests, binding, *, sub_of=None):
+        captured.update(bests=bests, binding=binding, sub_of=sub_of)
+        return b"png"
+
+    monkeypatch.setattr(matchers, "net_best50_card", fake_net_card)
+
+    await play_count_store.observe(
+        "888",
+        [
+            _mk_pc(199, 5),
+            _mk_pc(199, 3, typ=SongType.STANDARD),
+            _mk_pc(8, 9, typ=SongType.STANDARD),
+        ],
+        [],
+        anchored=True,
+    )
+
+    event = fake_private_message_event_v11(message="pc50", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.pc50_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("正在登录日服 NET 抓取成绩，请稍候…")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.image(f"base64://{b64(b'png').decode()}")]),
+            result=None,
+            bot=bot,
+        )
+
+    assert captured["binding"].service == "net"
+    # 版本分侧按日服现行版本（27000）：199 DX MAGiCAL → b15，其余 → b35
+    assert [s.id for s in captured["bests"].scores_b15] == [199]
+    assert [s.id for s in captured["bests"].scores_b35] == [8, 199]  # pc 9>3
+    assert captured["sub_of"](captured["bests"].scores_b35[0]) == "pc: 9"

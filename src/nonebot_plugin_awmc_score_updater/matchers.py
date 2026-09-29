@@ -13,6 +13,7 @@ from typing import Any
 from datetime import datetime
 
 from nonebot import on_regex, on_command
+from maimai_py import current_version_jp
 from nonebot.log import logger
 from nonebot.params import CommandArg, RegexGroup
 from maimai_py.models import PlayerIdentifier
@@ -62,9 +63,10 @@ from nonebot_plugin_awmc_helper.core.binding import (
     service_display,
 )
 from nonebot_plugin_awmc_helper.core.forward import try_send_forward
+from nonebot_plugin_awmc_helper.core.sources import Capability
 from nonebot_plugin_awmc_helper.core.render.score import DrawScore, score_list_height
 from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to_bytes
-from nonebot_plugin_awmc_helper.core.render.best50 import best50_bytes
+from nonebot_plugin_awmc_helper.core.render.best50 import best50_bytes, net_best50_card
 
 from .store import pc_key, row_key, wechat_store, play_count_store
 from .config import plugin_config
@@ -555,8 +557,9 @@ async def _(
 
     分数前缀处理与主插件分数列表一致：带小数点按定数匹配（13.0），否则按
     标级匹配（13 / 13+）；宴谱按其定数（.0/.7）自然入列。成绩展示字段来自
-    当前数据源（NET 数据源在 get_scores_all 内被 _guard_cn 拦截，仅国服源
-    可用），次数来自本插件 play_count 表。
+    当前数据源（经主插件数据源注册表路由；NET = 日服定数口径，2026-09-30
+    起开放），次数来自本插件 play_count 表——次数采集自国服机台导分，
+    NET 用户的国服不在架曲目无次数行、自然不入列。
     """
     ds_raw, page_raw = groups
     page = parse_page(page_raw)
@@ -579,7 +582,15 @@ async def _(
         ).finish(at_sender=True)
 
     binding = await binding_service.ensure(platform, user_id)
-    scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
+    if score_service.view_of(binding.service) == "jp":
+        # NET：全量成绩来自窗口缓存（抓取提示先行，主插件 b50/ap50 同款交互）
+        if score_service.needs_fetch(binding):
+            await UniMessage.text(" 正在登录日服 NET 抓取成绩，请稍候…").send(
+                at_sender=True
+            )
+        scores = await score_service.get_scores_all(binding)
+    else:
+        scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
 
     # 分数前缀同主插件分数列表口径：带小数点=定数，否则=标级；
     # 宴谱按其定数（.0/.7）自然入列
@@ -627,10 +638,12 @@ async def _(
 
     行为**谱面**粒度：一个谱面只对应一个难度，排序键 = 该谱面自身的 pc
     （平手比达成率，与 13pc列表 同口径），全难度谱面同池竞争；35/15 版本
-    拆分走主插件公共 build_bests，副行经 sub_of 钩子显示 pc（同 13pc列表
-    格式）。pc 表值为 0 的种子行（导分桥接未知次数）不入榜。头部 rating
-    三数字沿用模板占位口径（所列成绩 RA 之和，与 ap50 一致）。数据要求同
-    pc列表：NET 数据源被 _guard_cn 拦截，且需先「导」过（有次数）。
+    拆分走主插件公共 build_bests（NET 数据源按日服现行版本分侧），副行经
+    sub_of 钩子显示 pc（同 13pc列表 格式）。pc 表值为 0 的种子行（导分桥接
+    未知次数）不入榜。头部 rating 三数字沿用模板占位口径（所列成绩 RA 之
+    和，与 ap50 一致）。成绩经主插件数据源注册表路由（NET = 日服口径，
+    2026-09-30 起开放，身份卡与主插件 b50/ap50 共用）；次数采集自国服机台
+    导分，NET 用户的国服不在架曲目无次数行、自然不入榜，且需先「导」过。
     """
     platform, user_id = session_keys(session)
     wb = await wechat_store.get(platform, user_id)
@@ -648,6 +661,11 @@ async def _(
         ).finish(at_sender=True)
 
     binding = await binding_service.ensure(platform, user_id)
+    jp = score_service.view_of(binding.service) == "jp"
+    if jp and score_service.needs_fetch(binding):
+        await UniMessage.text(" 正在登录日服 NET 抓取成绩，请稍候…").send(
+            at_sender=True
+        )
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
     rows = [s for s in scores.scores if pc_map.get(pc_key(s), 0) > 0]
     if not rows:
@@ -657,6 +675,7 @@ async def _(
     bests = build_bests(
         rows,
         key=lambda s: (pc_map[pc_key(s)], s.achievements or 0),
+        latest_version_value=current_version_jp.value if jp else None,
     )
 
     if await play_count_store.last_full_at(wb.arcade_user_id) is None:
@@ -664,20 +683,27 @@ async def _(
             " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
         ).send(at_sender=True)
 
-    player = await score_service.get_player(binding, notify_slow=slow_notice())
-    png = await best50_bytes(
-        player_display_name(player),
-        bests.rating,
-        bests.rating_b35,
-        bests.rating_b15,
-        bests.scores_b35,
-        bests.scores_b15,
-        player=player,
-        qqid=binding_service.qq_of(binding),
-        service=binding.service,
-        theme=binding.theme or DEFAULT_THEME,
-        sub_of=lambda s: f"pc: {pc_map[pc_key(s)]}",
-    )
+    if jp:  # NET 身份卡与主插件 b50/ap50 共用（窗口缓存身份 + 官方素材注入）
+        png = await net_best50_card(
+            bests,
+            binding,
+            sub_of=lambda s: f"pc: {pc_map[pc_key(s)]}",
+        )
+    else:
+        player = await score_service.get_player(binding, notify_slow=slow_notice())
+        png = await best50_bytes(
+            player_display_name(player),
+            bests.rating,
+            bests.rating_b35,
+            bests.rating_b15,
+            bests.scores_b35,
+            bests.scores_b15,
+            player=player,
+            qqid=binding_service.qq_of(binding),
+            service=binding.service,
+            theme=binding.theme or DEFAULT_THEME,
+            sub_of=lambda s: f"pc: {pc_map[pc_key(s)]}",
+        )
     await UniMessage.image(raw=png).finish(at_sender=True)
 
 
@@ -714,11 +740,13 @@ help_registry.declare(
             matcher=pc50_cmd,
             name="pc50",
             aliases=("PC50",),
+            capability=Capability.SCORES_ALL,
             brief="游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）",
         ),
         CommandSpec(
             matcher=pc_list_cmd,
             name="<等级|定数>pc列表",
+            capability=Capability.SCORES_ALL,
             brief="游玩次数排行（口径同主插件分数列表，支持页码）",
             detail="整数=标级（13pc列表），小数=定数（13.0pc列表）。",
         ),
