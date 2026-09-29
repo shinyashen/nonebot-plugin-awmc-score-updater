@@ -30,11 +30,17 @@ from maimai_py.models import Score, PlayerIdentifier
 from maimai_py.exceptions import InvalidJsonError
 from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
 
+from .store import pc_key
 from .saltapi import SaltApiError, deser_score, fetch_score_payload
+
+# 谱面键：(曲目 id, SongType.value, LevelIndex.value)——统一复用 store.pc_key，
+# 供游玩次数桥接（observe 按 pc_key 元组取基线）与上传比对共用；字符串键与
+# 元组键永不相等，曾致存量行永不 +1（键型静默失效）
+ScoreKey = tuple[int, str, int]
 
 ChainCallback = Callable[[list[Score], BaseException | None, dict[str, Any]], None]
 # 成功链路的游玩次数观测钩子：(源成绩快照, 各数据站基线字典) —— 见 run_update
-PCHook = Callable[[list[Score], list[dict[str, Score]]], Awaitable[None]]
+PCHook = Callable[[list[Score], list[dict[ScoreKey, Score]]], Awaitable[None]]
 
 FAIL_TARGET_ATTR = "_awmc_fail_target"
 """异常实例上报错目标名的属性键。
@@ -129,7 +135,10 @@ def _join_rev(scores: Iterable[Score]) -> Score:
     scores_list = list(scores)
     if not scores_list:
         raise ValueError("至少需要一个 Score")
-    res = scores_list[0]
+    # replace 起底真拷贝：首站条目还留在 target_dicts 里随返回值交 pc 观测作
+    # 该站基线，原地 min/max 化会把基线污染成假值（机台真值对比假基线误判
+    # 虚增 +1），必须不动输入对象
+    res = replace(scores_list[0])
     res.achievements = min(s.achievements or 0 for s in scores_list)
     res.dx_score = min(s.dx_score or 0 for s in scores_list)
     # fc/fs 合成语义与 Hoshino 原版不同（2026-09-26 作者拍板改此处）：
@@ -260,7 +269,7 @@ async def delta_updates_chain(
     target_gather_callback: ChainCallback | None = None,
     target_update_callback: ChainCallback | None = None,
     compare_target: bool = True,
-) -> tuple[int, list[Score], list[dict[str, Score]], list[tuple[str, Exception]]]:
+) -> tuple[int, list[Score], list[dict[ScoreKey, Score]], list[tuple[str, Exception]]]:
     """增量/全量版 ``MaimaiClient.updates_chain``（裸成绩版）。
 
     ``compare_target=True``：源成绩与目标已有成绩比较后仅上传增量；
@@ -271,8 +280,9 @@ async def delta_updates_chain(
     返回 (因数据站拒绝（未收录曲目触发 500）而跳过的成绩条数 + 落雪预
     过滤剔除数, 源成绩快照, 各数据站基线字典列表, 失败目标列表)。源成绩为
     机台真值（_compare 原地合并前的独立拷贝）、基线为上传前的数据站状态，
-    二者供游玩次数观测（store.observe）比对；基线列表可能为空（全量模式 /
-    目标拉取全败，此时桥接无基准）。
+    二者供游玩次数观测（store.observe）比对；基线字典键为谱面元组键
+    （pc_key 同构），基线列表可能为空（全量模式 / 目标拉取全败，此时桥接
+    无基准）。
 
     部分成功语义（2026-09-28）：单目标上传失败不再上抛拖死整链——他站已
     写入的成绩不能因某一站（典型：水鱼写权限缺失）失败而白费。失败目标以
@@ -291,24 +301,23 @@ async def delta_updates_chain(
     source_scores_list = await _gather(
         client, source, source_gather_callback, source_mode
     )
-    source_scores_unique: dict[str, Score] = {}
+    source_scores_unique: dict[ScoreKey, Score] = {}
     for scores in source_scores_list:
         for score in scores:
-            key = f"{score.id} {score.type} {score.level_index}"
+            key = pc_key(score)
             source_scores_unique[key] = score._join(source_scores_unique.get(key, None))
     # PC 观测用源成绩快照：必须在 _compare 之前取且须真拷贝——_compare 原地
     # 合并目标基准值，浅拷贝列表仍引用同一 Score 对象，快照会被污染失真
     source_scores = [replace(s) for s in source_scores_unique.values()]
 
     # 目标成绩拉取并取交集合并（_join_rev：保守基准）
-    target_dicts: list[dict[str, Score]] = []
+    target_dicts: list[dict[ScoreKey, Score]] = []
     if compare_target:
         target_scores_list = await _gather(
             client, target, target_gather_callback, target_mode
         )
         target_dicts = [
-            {f"{score.id} {score.type} {score.level_index}": score for score in scores}
-            for scores in target_scores_list
+            {pc_key(score): score for score in scores} for scores in target_scores_list
         ]
     if target_dicts:
         common_keys = set(target_dicts[0].keys())

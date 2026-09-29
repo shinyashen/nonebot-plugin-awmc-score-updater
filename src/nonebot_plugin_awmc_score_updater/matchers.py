@@ -57,7 +57,7 @@ from nonebot_plugin_awmc_helper.core.render.score import DrawScore, score_list_h
 from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to_bytes
 from nonebot_plugin_awmc_helper.core.render.best50 import best50_bytes
 
-from .store import wechat_store, play_count_store
+from .store import pc_key, row_key, wechat_store, play_count_store
 from .config import plugin_config
 from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
 from .updater import FAIL_TARGET_ATTR, SaltArcadeProvider, run_update
@@ -606,7 +606,7 @@ async def _(
             at_sender=True
         )
     pc_map = {
-        (r.music_id, r.type, r.level_index): r.play_count
+        row_key(r): r.play_count
         for r in await play_count_store.counts(wb.arcade_user_id)
     }
     if not pc_map:
@@ -621,14 +621,12 @@ async def _(
         matched = [s for s in scores.scores if abs(s.level_value - ds) < 0.05]
     else:
         matched = [s for s in scores.scores if s.level == ds_raw]
-    matched = [
-        s for s in matched if (s.id, s.type.value, s.level_index.value) in pc_map
-    ]
+    matched = [s for s in matched if pc_key(s) in pc_map]
     if not matched:
         await UniMessage.text("  没有找到符合条件的成绩").finish(at_sender=True)
 
     def pc_of(s) -> int:
-        return pc_map[(s.id, s.type.value, s.level_index.value)]
+        return pc_map[pc_key(s)]
 
     matched.sort(key=lambda s: (-pc_of(s), -(s.achievements or 0)))
 
@@ -679,7 +677,7 @@ async def _(
             at_sender=True
         )
     pc_map = {
-        (r.music_id, r.type, r.level_index): r.play_count
+        row_key(r): r.play_count
         for r in await play_count_store.counts(wb.arcade_user_id)
     }
     if not pc_map:
@@ -689,21 +687,14 @@ async def _(
 
     binding = await binding_service.ensure(platform, user_id)
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
-    rows = [
-        s
-        for s in scores.scores
-        if pc_map.get((s.id, s.type.value, s.level_index.value), 0) > 0
-    ]
+    rows = [s for s in scores.scores if pc_map.get(pc_key(s), 0) > 0]
     if not rows:
         await UniMessage.text(
             " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
         ).finish(at_sender=True)
     bests = build_bests(
         rows,
-        key=lambda s: (
-            pc_map[(s.id, s.type.value, s.level_index.value)],
-            s.achievements or 0,
-        ),
+        key=lambda s: (pc_map[pc_key(s)], s.achievements or 0),
     )
 
     if await play_count_store.last_full_at(wb.arcade_user_id) is None:
@@ -723,6 +714,6 @@ async def _(
         qqid=binding_service.qq_of(binding),
         service=binding.service,
         theme=binding.theme or DEFAULT_THEME,
-        sub_of=lambda s: f"pc: {pc_map[(s.id, s.type.value, s.level_index.value)]}",
+        sub_of=lambda s: f"pc: {pc_map[pc_key(s)]}",
     )
     await UniMessage.image(raw=png).finish(at_sender=True)

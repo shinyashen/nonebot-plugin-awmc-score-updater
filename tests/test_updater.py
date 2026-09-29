@@ -98,6 +98,40 @@ def test_join_rev_takes_conservative_base():
     assert merged.play_count == 1
 
 
+def test_join_rev_does_not_mutate_input():
+    """_join_rev 以 replace 起底真拷贝（L-10）：交集首站条目还在 target_dicts
+    里随返回值交 pc 观测作该站基线，原地 min/max 化会把基线污染成假值
+    （机台真值对比假基线误判虚增 +1）。"""
+    from nonebot_plugin_awmc_score_updater.updater import _join_rev
+
+    a = mk_score(achievements=99.5, dx_score=1990, fc=None, fs=None, play_count=5)
+    b = mk_score(
+        achievements=99.0, dx_score=2000, fc=FCType.FC, fs=FSType.FS, play_count=3
+    )
+    merged = _join_rev([a, b])
+    # 合成基线：达成率/DX 分/pc 取 min，fc/fs 有值目标内取更优
+    assert merged.achievements == 99.0
+    assert merged.dx_score == 1990
+    assert merged.fc == FCType.FC
+    assert merged.fs == FSType.FS
+    assert merged.play_count == 3
+    # 输入对象保持各站原始值
+    assert (a.achievements, a.dx_score, a.fc, a.fs, a.play_count) == (
+        99.5,
+        1990,
+        None,
+        None,
+        5,
+    )
+    assert (b.achievements, b.dx_score, b.fc, b.fs, b.play_count) == (
+        99.0,
+        2000,
+        FCType.FC,
+        FSType.FS,
+        3,
+    )
+
+
 def test_compare_no_gain_returns_none():
     from nonebot_plugin_awmc_score_updater.updater import _compare
 
