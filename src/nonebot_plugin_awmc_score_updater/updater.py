@@ -438,7 +438,6 @@ async def run_update(
     *,
     full: bool,
     max_retries: int = 3,
-    gather_log_name: str = "salt",
     pc_hook: PCHook | None = None,
 ) -> tuple[float, int, list[tuple[str, Exception]]]:
     """执行一次传分：全量（跳过目标比对）或增量（与目标比对只传提升）。
@@ -456,18 +455,24 @@ async def run_update(
     if not target:
         raise SaltApiError("没有可用的成绩数据库，请先绑定水鱼或落雪")
 
-    def gather_callback(
+    def source_gather_callback(
         scores: list[Score], err: BaseException | None, ctx: dict[str, Any]
     ) -> None:
+        # 源固定是机台（SaltNet），文案不取 ctx.name——该形参曾被误兼作目标
+        # 基线回调，增量模式下打出「从落雪源获取成功」误导
         if err:
-            logger.error(
-                f"从{ctx.get('name', gather_log_name)}源获取数据失败:\n{err!r}"
-            )
+            logger.error(f"从机台拉取成绩失败:\n{err!r}")
         else:
-            logger.info(
-                f"从{ctx.get('name', gather_log_name)}源获取数据成功，"
-                f"共 {len(scores)} 条成绩"
-            )
+            logger.info(f"从机台拉取成绩成功，共 {len(scores)} 条成绩")
+
+    def target_gather_callback(
+        scores: list[Score], err: BaseException | None, ctx: dict[str, Any]
+    ) -> None:
+        name = ctx.get("name", "?")
+        if err:
+            logger.error(f"拉取{name}已有成绩（基线）失败:\n{err!r}")
+        else:
+            logger.info(f"拉取{name}已有成绩（基线）成功，共 {len(scores)} 条成绩")
 
     def update_callback(
         scores: list[Score], err: BaseException | None, ctx: dict[str, Any]
@@ -500,8 +505,8 @@ async def run_update(
                 target,
                 "parallel",
                 "parallel",
-                gather_callback,
-                None if full else gather_callback,
+                source_gather_callback,
+                None if full else target_gather_callback,
                 update_callback,
                 compare_target=not full,
             )
