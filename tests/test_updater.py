@@ -711,6 +711,63 @@ async def test_run_update_pc_hook_not_called_on_failure(songs):
     assert calls == []
 
 
+async def test_delta_chain_invalid_json_retry_narrowed_to_failed_targets(songs):
+    """InvalidJsonError 降级重传只针对返回该错误的目标（L-42）：
+
+    已成功站不重传（重复上传纯浪费配额），failures 按目标合并两轮结果——
+    修复前对全部目标重传且首轮结果被整体覆盖。"""
+    from maimai_py.exceptions import InvalidJsonError
+
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(song_id=199, achievements=100.0, dx_score=2500),
+            # 未收录曲（624 不在任何目标基线里）→ 降级时剔除，skipped=1
+            mk_score(
+                song_id=624,
+                achievements=90.0,
+                dx_score=100,
+                song_type=SongType.STANDARD,
+            ),
+        ]
+    )
+
+    class JsonFlakyProvider(FakeUpdateProvider):
+        """首轮上传抛 InvalidJsonError（500 HTML），重传成功。"""
+
+        def __init__(self, scores=None):
+            super().__init__(scores)
+            self.update_calls = 0
+
+        async def update_scores(self, identifier, scores, client):
+            self.update_calls += 1
+            if self.update_calls == 1:
+                raise InvalidJsonError("<html>500</html>")
+            self.updates.append(list(scores))
+            self.scores.extend(scores)
+
+    water = JsonFlakyProvider([mk_score(achievements=99.0, dx_score=2000)])
+    lxns = FakeUpdateProvider([mk_score(achievements=99.0, dx_score=2000)])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (water, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (lxns, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+
+    skipped, _, _, failures = await delta_updates_chain(client, src, targets)
+
+    assert skipped == 1
+    assert failures == []
+    # 落雪首轮已成功：仅 1 次上传（含 199+624），不参与重传
+    assert len(lxns.updates) == 1
+    assert sorted(s.id for s in lxns.updates[0]) == [199, 624]
+    # 水鱼首轮 InvalidJson：重传仅含已收录部分
+    assert water.update_calls == 2
+    assert [s.id for s in water.updates[0]] == [199]
+
+
 async def test_delta_chain_partial_failure_collected(songs):
     """部分成功语义（2026-09-28）：单目标失败不上抛拖死整链——失败目标
     收集进返回值（异常自带归属标签），他站照常收到上传。"""

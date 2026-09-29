@@ -356,10 +356,16 @@ async def delta_updates_chain(
         )
 
     upload_tasks: list[asyncio.Task] = []
+    # 与 upload_tasks 对齐的各上传任务目标名（降级重传按目标名单收窄用）
+    upload_names: list[str] = []
 
-    async def _schedule_upload(batch: list[Score]) -> None:
+    async def _schedule_upload(
+        batch: list[Score], only_names: set[str] | None = None
+    ) -> None:
         for tp, ident, kwargs in target:
             if ident is None:
+                continue
+            if only_names is not None and kwargs.get("name", "") not in only_names:
                 continue
             batch_t = batch
             allowed = kwargs.get("allowed_ids")
@@ -375,6 +381,7 @@ async def delta_updates_chain(
                         )
                     )
                 )
+                upload_names.append(kwargs.get("name", ""))
                 if (cb := target_update_callback) is not None:
                     # 闭包内变量收窄失效，回调经默认参数固定为非 None 局部
                     upload_tasks[-1].add_done_callback(
@@ -388,13 +395,26 @@ async def delta_updates_chain(
         filtered = [s for s in delta_scores if s.id % 10000 in known_song_ids]
         skipped_unknown = len(delta_scores) - len(filtered)
         if filtered and skipped_unknown:
+            # 仅对返回 InvalidJsonError 的目标降级重传已收录部分：已成功站
+            # 重传纯浪费（配额/去重），其他原因失败站重传也改不了结果；
+            # failures 按目标合并两轮结果（首轮其他目标结果保留）
+            retry_idx = [
+                i for i, r in enumerate(results) if isinstance(r, InvalidJsonError)
+            ]
+            retry_names = {upload_names[i] for i in retry_idx}
             logger.warning(
-                f"数据站拒绝上传（含未收录曲目成绩），"
+                f"{'、'.join(retry_names)}拒绝上传（含未收录曲目成绩），"
                 f"剔除 {skipped_unknown} 条后重传已收录部分"
             )
             upload_tasks.clear()
-            await _schedule_upload(filtered)
-            results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+            upload_names.clear()
+            await _schedule_upload(filtered, only_names=retry_names)
+            retry_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+            merged = list(results)
+            # 重传轮沿用 target 遍历序，与 retry_idx 的首轮顺序一一对应
+            for local_i, global_i in enumerate(retry_idx):
+                merged[global_i] = retry_results[local_i]
+            results = merged
 
     # 部分成功语义：失败目标收集返回（异常自带归属标签）；全失败仍上抛，
     # 由调用方既有映射给出整链错误文案
