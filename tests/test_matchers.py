@@ -564,22 +564,19 @@ async def test_help_forward_then_guide_image(app: App, stores, monkeypatch):
 
         bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
         ctx.receive_event(bot, event)
-        # 转发成功即 return：无额外发送（引导图在转发内）
+        # 转发成功即 return：无额外发送
     assert forwarded == [True]
     # 与注册表装配同源：头节点 + 4 步骤（水鱼步骤附图为独立纯图节点）
     expected = page_entries(
         help_registry, GuidePage(guide=help_registry.guides["导分"])
     )
     assert entries == expected
-    assert len(entries) == 6
-    import nonebot_plugin_alconna.uniseg as uniseg
-
-    assert isinstance(entries[3], uniseg.UniMessage)  # 水鱼步骤引导图（文案后独立节点）
-    assert all(isinstance(e, str) for i, e in enumerate(entries) if i != 3)
+    assert len(entries) == 5
+    assert all(isinstance(e, str) for e in entries)  # OAuth 单轨后无引导图节点
 
 
 async def test_help_fallback_two_images(app: App, stores, monkeypatch):
-    """非 OneBot / 转发失败：降级为文字渲染图（注册表 page_text 同源）+ 引导图。"""
+    """非 OneBot / 转发失败：降级为文字渲染图（注册表 page_text 同源）。"""
 
     from fake import fake_private_message_event_v11
     from nonebot.adapters.onebot.v11 import Message, MessageSegment
@@ -610,10 +607,6 @@ async def test_help_fallback_two_images(app: App, stores, monkeypatch):
                 + b64encode(
                     image_to_bytes(text_to_image(page_text(help_registry, page)))
                 ).decode()
-            ),
-            MessageSegment.image(
-                "base64://"
-                + b64encode(matchers._IMPORT_TOKEN_IMG.read_bytes()).decode()
             ),
         ]
     )
