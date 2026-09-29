@@ -256,7 +256,6 @@ _import_locks: dict[tuple[str, str], asyncio.Lock] = {}
 async def _run_with_refresh(
     binding,
     source: list,
-    qrcode: str | None,
     full: bool,
     notify_slow=None,
     pc_hook=None,
@@ -495,7 +494,6 @@ async def _(
             duration, _skipped, lx_note, names, failures = await _run_with_refresh(
                 binding,
                 source,
-                qrcode,
                 full=bool(qrcode),
                 notify_slow=notify_slow,
                 pc_hook=pc_hook,

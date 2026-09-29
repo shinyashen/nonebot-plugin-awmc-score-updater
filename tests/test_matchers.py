@@ -653,7 +653,7 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
 
     # 5s 后成功
     sleeps, calls = await setup("refreshed", 1)
-    result = await matchers._run_with_refresh(binding, [], None, False)
+    result = await matchers._run_with_refresh(binding, [], False)
     assert result == (1.0, 0, None, ["落雪"], [])
     assert calls["n"] == 2
     assert sleeps == [5]
@@ -665,7 +665,7 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
         notices.append(1)
 
     sleeps, calls = await setup("refreshed", 2)
-    result = await matchers._run_with_refresh(binding, [], None, False, notify_slow)
+    result = await matchers._run_with_refresh(binding, [], False, notify_slow)
     assert result == (1.0, 0, None, ["落雪"], [])
     assert calls["n"] == 3
     assert sleeps == [5, 10]
@@ -674,7 +674,7 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
     # 全败：非技术兜底文案
     sleeps, calls = await setup("refreshed", 99)
     with pytest.raises(matchers.ImportFailed, match="暂时未能同步"):
-        await matchers._run_with_refresh(binding, [], None, False, notify_slow)
+        await matchers._run_with_refresh(binding, [], False, notify_slow)
     assert calls["n"] == 3
     assert sleeps == [5, 10]
     assert len(notices) == 2
@@ -682,14 +682,14 @@ async def test_run_with_refresh_ladder_and_copies(monkeypatch):
     # dead：重绑文案（不进阶梯）
     sleeps, calls = await setup("dead", 99)
     with pytest.raises(matchers.ImportFailed, match="重新绑定落雪"):
-        await matchers._run_with_refresh(binding, [], None, False)
+        await matchers._run_with_refresh(binding, [], False)
     assert calls["n"] == 1
     assert sleeps == []
 
     # skip：原异常上抛（保留「token 无效」映射给无 rt 场景）
     sleeps, calls = await setup("skip", 99)
     with pytest.raises(InvalidPlayerIdentifierError):
-        await matchers._run_with_refresh(binding, [], None, False)
+        await matchers._run_with_refresh(binding, [], False)
     assert calls["n"] == 1
     assert sleeps == []
 
@@ -734,7 +734,7 @@ async def test_run_with_refresh_skips_renewal_without_lxns_target(monkeypatch):
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
 
     with pytest.raises(InvalidPlayerIdentifierError):
-        await matchers._run_with_refresh(binding, [], None, False)
+        await matchers._run_with_refresh(binding, [], False)
     assert sleeps == []
 
 
@@ -779,7 +779,7 @@ async def test_run_with_refresh_df_failure_tagged_does_not_renew(monkeypatch):
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
 
     with pytest.raises(InvalidPlayerIdentifierError):
-        await matchers._run_with_refresh(binding, [], None, False)
+        await matchers._run_with_refresh(binding, [], False)
     assert sleeps == []
 
 
@@ -1185,7 +1185,7 @@ async def test_run_with_refresh_partial_lxns_401_renewed(monkeypatch):
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
 
     duration, _skipped, _lx_note, names, failures = await matchers._run_with_refresh(
-        binding, [], None, False
+        binding, [], False
     )
     assert duration == 2.0
     assert names == ["水鱼", "落雪"]
@@ -1229,7 +1229,7 @@ async def test_run_with_refresh_partial_lxns_dead_rebind_hint(monkeypatch):
     monkeypatch.setattr(matchers, "run_update", fake_run_update)
 
     duration, _skipped, _lx_note, _names, failures = await matchers._run_with_refresh(
-        binding, [], None, False
+        binding, [], False
     )
     assert duration == 1.0
     assert [n for n, _ in failures] == ["落雪"]
