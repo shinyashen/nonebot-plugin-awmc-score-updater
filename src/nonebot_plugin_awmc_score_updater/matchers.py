@@ -477,9 +477,6 @@ async def _(
             )
         ]
 
-        async def notify_slow():
-            await UniMessage.text(" 比预期时间要长，再稍等一下…").send(at_sender=True)
-
         # 游玩次数观测：链路成功后恰好调用一次（扫码全量=权威替换，简略=桥接）
         async def pc_hook(source_scores, target_dicts):
             await play_count_store.observe(
@@ -495,7 +492,8 @@ async def _(
                 binding,
                 source,
                 full=bool(qrcode),
-                notify_slow=notify_slow,
+                # 落雪续期进入 10s 档的慢查询提示复用 core 单源（发送失败静默）
+                notify_slow=slow_notice(),
                 pc_hook=pc_hook,
             )
         except (
