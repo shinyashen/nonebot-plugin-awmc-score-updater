@@ -8,8 +8,6 @@
 去主插件指令。
 """
 
-import json
-import base64
 import asyncio
 from typing import Any
 from pathlib import Path
@@ -32,6 +30,7 @@ from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from maimai_py.providers.lxns import is_jwt
 from nonebot_plugin_alconna.uniseg import UniMessage
+from nonebot_plugin_awmc_helper.core.ext import jwt_payload_unverified
 from nonebot_plugin_awmc_helper.constants import DEFAULT_THEME
 from nonebot_plugin_awmc_helper.core.score import (
     UserScoreError,
@@ -42,6 +41,7 @@ from nonebot_plugin_awmc_helper.core.utils import (
     parse_page,
     slow_notice,
     handle_errors,
+    player_display_name,
 )
 from nonebot_plugin_awmc_helper.core.client import (
     client,
@@ -141,11 +141,8 @@ def _lxns_writable(token: str) -> bool:
     """
     if not is_jwt.match(token):
         return True
-    try:
-        payload = token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except Exception:
+    claims = jwt_payload_unverified(token)
+    if claims is None:
         return True
     return _LXNS_WRITE_SCOPE in str(claims.get("scope", ""))
 
@@ -652,11 +649,6 @@ async def _(
     await UniMessage.image(raw=png).finish(at_sender=True)
 
 
-def _display_name(player) -> str:
-    """卡片显示名：水鱼 Player.name 是账号用户名，展示用昵称（主插件同款）。"""
-    return getattr(player, "nickname", None) or player.name
-
-
 @pc50_cmd.handle()
 @handle_errors("查询失败", except_with_message=(UserScoreError,))
 async def _(
@@ -705,7 +697,7 @@ async def _(
 
     player = await score_service.get_player(binding, notify_slow=slow_notice())
     png = await best50_bytes(
-        _display_name(player),
+        player_display_name(player),
         bests.rating,
         bests.rating_b35,
         bests.rating_b15,
