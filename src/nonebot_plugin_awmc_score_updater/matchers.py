@@ -32,6 +32,15 @@ from maimai_py.providers.lxns import is_jwt
 from nonebot_plugin_alconna.uniseg import UniMessage
 from nonebot_plugin_awmc_helper.core.ext import jwt_payload_unverified
 from nonebot_plugin_awmc_helper.constants import DEFAULT_THEME
+from nonebot_plugin_awmc_helper.core.help import (
+    Guide,
+    GuidePage,
+    GuideStep,
+    CommandSpec,
+    page_text,
+    page_entries,
+    help_registry,
+)
 from nonebot_plugin_awmc_helper.core.score import (
     UserScoreError,
     build_bests,
@@ -63,48 +72,9 @@ from .config import plugin_config
 from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
 from .updater import FAIL_TARGET_ATTR, SaltArcadeProvider, run_update
 
-# 合并转发节点与降级图片的文字内容（同源）；水鱼节点附 Import-Token 获取
-# 位置的引导截图（assets/import_token.jpg，沿用 Hoshino 原版素材）
-HELP_SECTIONS = [
-    "上传国服 maimaiDX 成绩至水鱼/落雪成绩数据库。\n\n"
-    "指令：导/传分/上传分数/wmupdate [二维码内容]\n"
-    "· 不带二维码 = 简略上传（仅达成率与 DX 分的增量）\n"
-    "· 带二维码 = 全量上传（仅私聊或白名单群），并校准游玩次数\n"
-    "· 13pc列表 / 13.0pc列表：游玩次数排行（标级/定数前缀与\n"
-    "  分数列表同口径，支持页码）\n"
-    "· pc50：游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）\n"
-    "· 「导」字开头的指令有专属回复喵",
-    "绑定机台账号（仅私聊）：\n"
-    "绑定微信/bindwx <SGWCMAID.../https...>\n"
-    "发送二维码识别后的内容（SGWCMAID 开头），或二维码页面的链接",
-    "导分依赖主插件 awmc-helper 的绑定，请先在主插件完成（发给 bot 即可）：\n"
-    "绑定水鱼token <Import-Token> —— 绑定后才能导分水鱼。\n"
-    "获取方式见下图：水鱼查分器个人页 → 设置 → 生成 Import-Token。\n"
-    "注意：仅「绑定水鱼 <用户名>」的公开查询档无法导分；也可发「绑定水鱼」\n"
-    "完成一次 OAuth 授权代替 Import-Token（水鱼现已强制写入走授权）",
-    "绑定落雪：在主插件发送「绑定落雪」，按回复的授权链接完成落雪授权，"
-    "再把授权码直接回复给 bot（无需任何前缀，90 秒内有效）。\n"
-    "新版授权自带成绩上传权限；旧版授权会在导分时提示重新绑定",
-]
-
-HELP_TEXT = "\n\n".join(HELP_SECTIONS)
-
+# 水鱼 Import-Token 获取位置的引导截图（assets/import_token.jpg，沿用
+# Hoshino 原版素材）；帮助文案全部迁入主插件帮助注册表（M10「导分」指南）
 _IMPORT_TOKEN_IMG = Path(__file__).parent / "assets" / "import_token.jpg"
-
-
-def _help_entries() -> list["str | UniMessage"]:
-    """合并转发节点：引导图为独立纯图节点（不与文字混节点）。
-
-    节点构造已对齐 Hoshino 原版实测可用形态（name/uin 键 + file:/// 图片
-    URI，见主插件 core.forward 升级记录）；此前「消息类型暂不支持查看」
-    实为图文混合单节点 + 图片路径形式不规范所致。"""
-    return [
-        HELP_SECTIONS[0],
-        HELP_SECTIONS[1],
-        HELP_SECTIONS[2],
-        UniMessage.image(path=_IMPORT_TOKEN_IMG),
-        HELP_SECTIONS[3],
-    ]
 
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
@@ -384,7 +354,10 @@ async def _(
 
     parts = args.extract_plain_text().strip().split()
     if parts == ["帮助"]:
-        await UniMessage.text(HELP_TEXT).finish(at_sender=True)
+        _g = help_registry.guides["导分"]
+        await UniMessage.text(
+            f"{_g.intro}\n前置条件：{_g.prerequisites}\n发送「导帮助」查看分步流程（附水鱼引导图）"
+        ).finish(at_sender=True)
     qr_input = parts[0] if parts else None
 
     # 全量上传（带二维码）的群白名单门禁；简略上传群聊不受限
@@ -543,13 +516,17 @@ async def _(
 @help_cmd.handle()
 @handle_errors()
 async def _(bot: Bot, session: Session = UniSession()):
-    # OneBot v11 合并转发（对齐原版帮助形态，水鱼节点附引导图）；失败或
+    # OneBot v11 合并转发（M10「导分」指南页，水鱼步骤附引导图）；失败或
     # 其他适配器降级为文字渲染图片 + 引导图（纯文本字数过多）
+    page = GuidePage(guide=help_registry.guides["导分"])
+    entries = page_entries(help_registry, page)
     group_id = str(session.scene.id) if session.scene.type == SceneType.GROUP else None
     user_id = None if group_id else str(session.user.id)
-    if await try_send_forward(bot, _help_entries(), group_id=group_id, user_id=user_id):
+    if await try_send_forward(bot, entries, group_id=group_id, user_id=user_id):
         return
-    guide = UniMessage.image(raw=image_to_bytes(text_to_image(HELP_TEXT)))
+    guide = UniMessage.image(
+        raw=image_to_bytes(text_to_image(page_text(help_registry, page)))
+    )
     guide += UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes())
     await guide.finish(at_sender=True)
 
@@ -710,3 +687,109 @@ async def _(
         sub_of=lambda s: f"pc: {pc_map[pc_key(s)]}",
     )
     await UniMessage.image(raw=png).finish(at_sender=True)
+
+
+# ---------------------------------------------------------------- 帮助声明
+# 指令按功能就近入主插件类别（M10 拍板⑦）：绑定微信→绑定、pc 排行→查分、
+# 导→工具；「导分」指南为流程轴首个真实消费者（水鱼步骤附引导图）
+
+_SU_PLUGIN = "nonebot_plugin_awmc_score_updater"
+
+help_registry.declare(
+    plugin=_SU_PLUGIN,
+    title="成绩导分",
+    category="bind",
+    commands=[
+        CommandSpec(
+            matcher=bindwx_cmd,
+            name="绑定微信",
+            aliases=("bindwx", "微信绑定"),
+            scope="仅私聊",
+            brief="绑定机台账号（二维码识别内容或页面链接）",
+            detail=(
+                "格式：绑定微信 <SGWCMAID.../https...>；"
+                "二维码含账号凭据，禁止群聊使用。"
+            ),
+        ),
+    ],
+)
+help_registry.declare(
+    plugin=_SU_PLUGIN,
+    title="成绩导分",
+    category="score",
+    commands=[
+        CommandSpec(
+            matcher=pc50_cmd,
+            name="pc50",
+            aliases=("PC50",),
+            brief="游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）",
+        ),
+        CommandSpec(
+            matcher=pc_list_cmd,
+            name="<等级|定数>pc列表",
+            brief="游玩次数排行（口径同主插件分数列表，支持页码）",
+            detail="整数=标级（13pc列表），小数=定数（13.0pc列表）。",
+        ),
+    ],
+)
+help_registry.declare(
+    plugin=_SU_PLUGIN,
+    title="成绩导分",
+    category="tools",
+    commands=[
+        CommandSpec(
+            matcher=update_cmd,
+            name="导",
+            aliases=("传分", "上传分数", "wmupdate"),
+            scope="全量上传仅私聊/白名单群",
+            brief="上传国服成绩至水鱼/落雪（简略增量 / 带二维码全量并校准游玩次数）",
+            detail="「导」字开头的指令有专属回复喵。",
+        ),
+    ],
+)
+
+help_registry.declare_guide(
+    Guide(
+        key="导分",
+        title="导分",
+        aliases=("传分",),
+        intro=(
+            "把国服成绩一键导出到水鱼/落雪成绩数据库。\n"
+            "「导」不带二维码=简略上传（仅达成率与 DX 分增量）；带二维码=全量上传"
+            "并校准游玩次数（仅私聊或白名单群）。\n"
+            "pc50 / pc列表 可查看上传后的游玩次数排行。"
+        ),
+        prerequisites=(
+            "机台账号 + 数据站绑定（至少其一）：① 绑定微信（仅私聊）；"
+            "② 主插件 awmc-helper 的水鱼/落雪绑定，发指令给 bot 即可。"
+        ),
+        steps=[
+            GuideStep(
+                text="绑定机台账号（仅私聊，发二维码识别内容或页面链接）：",
+                commands=("绑定微信",),
+            ),
+            GuideStep(
+                text=(
+                    "绑定水鱼（二选一：OAuth 授权 / Import-Token）。"
+                    "仅「绑定水鱼 <用户名>」公开查询档无法导分，"
+                    "水鱼现已强制写入走授权。"
+                    "下图引导：水鱼查分器个人页 → 设置 → 生成 Import-Token"
+                ),
+                commands=("绑定水鱼", "绑定水鱼token"),
+                image=_IMPORT_TOKEN_IMG,
+            ),
+            GuideStep(
+                text=(
+                    "绑定落雪（OAuth 授权码 90 秒内直接回复给 bot；"
+                    "也可好友码/Token 直绑）："
+                ),
+                commands=("绑定落雪",),
+            ),
+            GuideStep(
+                text=("开导：全量上传发二维码，简略增量直接发；导完可查游玩次数排行："),
+                commands=("导", "pc50", "<等级|定数>pc列表"),
+            ),
+        ],
+        source=_SU_PLUGIN,
+    )
+)
