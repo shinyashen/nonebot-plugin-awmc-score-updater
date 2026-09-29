@@ -1539,3 +1539,164 @@ async def test_pc_commands_jp_gate(app: App, stores):
                 bot=bot,
             )
             ctx.should_finished()
+
+    # @ 代查门禁随目标：发送者国服、目标日服 → 仍拦截（按目标绑定判定）
+    from fake import fake_group_message_event_v11
+    from nonebot.adapters.onebot.v11 import Message as OBMessage
+    from nonebot.adapters.onebot.v11 import MessageSegment as OBMessageSegment
+
+    async with AsyncSession(get_engine()) as session:
+        session.add(
+            UserBinding(
+                platform="OneBot V11",
+                user_id="99999999",
+                service="net",
+                net_sega_id="sid",
+            )
+        )
+        await session.commit()
+    event = fake_group_message_event_v11(
+        message=OBMessage(
+            [
+                OBMessageSegment.text("pc50"),
+                OBMessageSegment.at(99999999),
+            ]
+        ),
+        user_id=12345678,
+    )
+    async with app.test_matcher(matchers.pc50_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_api(
+            "get_group_info",
+            {"group_id": 87654321},
+            result={
+                "group_id": 87654321,
+                "group_name": "g",
+                "member_count": 1,
+                "max_member_count": 10,
+            },
+        )
+        ctx.should_call_api(
+            "get_group_member_info",
+            {"group_id": 87654321, "user_id": 12345678, "no_cache": True},
+            result={"user_id": 12345678, "role": "member", "card": "", "nickname": "t"},
+        )
+        ctx.should_call_send(
+            event,
+            OBMessage(
+                [OBMessageSegment.at(12345678), OBMessageSegment.text(" " + gate_msg)]
+            ),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_finished()
+
+
+@pytest.mark.asyncio
+async def test_pc50_at_target(app: App, stores, monkeypatch):
+    """pc50 @代查（2026-09-30）：绑定/微信/pc 数据均取 at 目标——卡面
+    qqid 为目标 QQ，成绩与次数表均来自目标。"""
+    from types import SimpleNamespace
+    from base64 import b64encode as b64
+
+    import nonebot
+    from fake import fake_group_message_event_v11
+    from maimai_py import SongType
+    from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+    from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+    from sqlmodel.ext.asyncio.session import AsyncSession
+    from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
+
+    from nonebot_plugin_awmc_score_updater import matchers
+    from nonebot_plugin_awmc_score_updater.store import (
+        wechat_store,
+        play_count_store,
+    )
+
+    async with AsyncSession(get_engine()) as session:
+        session.add(
+            UserBinding(
+                platform="OneBot V11",
+                user_id="99999999",
+                divingfish_import_token="a" * 128,
+            )
+        )
+        await session.commit()
+    await wechat_store.bind("OneBot V11", "99999999", "888")
+
+    rows = [
+        _mk_ext(199, version=26000, ra=150),
+        _mk_ext(
+            8,
+            typ=SongType.STANDARD,
+            level="12",
+            level_value=12.4,
+            version=10000,
+            ra=100,
+        ),
+    ]
+
+    async def fake_get_scores_all(binding, notify_slow=None):
+        return SimpleNamespace(scores=rows)
+
+    async def fake_get_player(binding, notify_slow=None):
+        return SimpleNamespace(name="acct", nickname="nick")
+
+    monkeypatch.setattr(
+        matchers,
+        "score_service",
+        SimpleNamespace(get_scores_all=fake_get_scores_all, get_player=fake_get_player),
+    )
+    captured = {}
+
+    async def fake_best50_bytes(player_name, rating, rb35, rb15, b35, b15, **kw):
+        captured.update(b35=b35, b15=b15, kw=kw)
+        return b"png"
+
+    monkeypatch.setattr(matchers, "best50_bytes", fake_best50_bytes)
+
+    await play_count_store.observe(
+        "888",
+        [_mk_pc(199, 5), _mk_pc(8, 9, typ=SongType.STANDARD)],
+        [],
+        anchored=True,
+    )
+
+    event = fake_group_message_event_v11(
+        message=Message([MessageSegment.text("pc50"), MessageSegment.at(99999999)]),
+        user_id=12345678,
+    )
+    async with app.test_matcher(matchers.pc50_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_api(
+            "get_group_info",
+            {"group_id": 87654321},
+            result={
+                "group_id": 87654321,
+                "group_name": "g",
+                "member_count": 1,
+                "max_member_count": 10,
+            },
+        )
+        ctx.should_call_api(
+            "get_group_member_info",
+            {"group_id": 87654321, "user_id": 12345678, "no_cache": True},
+            result={"user_id": 12345678, "role": "member", "card": "", "nickname": "t"},
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.at(12345678),
+                    MessageSegment.image(f"base64://{b64(b'png').decode()}"),
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_finished()
+    assert captured["kw"]["qqid"] == 99999999  # 卡面身份 = at 目标
+    assert [s.id for s in captured["b35"]] == [8]  # 曲 8（v10000 旧版本侧）
+    assert [s.id for s in captured["b15"]] == [199]  # 曲 199（v26000 新版本侧）
