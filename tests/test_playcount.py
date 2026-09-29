@@ -150,3 +150,78 @@ async def test_empty_source_scores_noop(pc_store):
     await pc_store.observe("u1", [], [], anchored=False)
     assert await pc_store.counts("u1") == []
     assert await pc_store.last_full_at("u1") is None
+
+
+async def test_run_update_observe_bridge_increments(pc_store):
+    """全链集成（L-9 回归）：run_update(pc_hook=...) → observe 桥接增量。
+
+    链返回基线字典键曾为字符串，observe 按 pc_key 元组取恒 miss → 存量行
+    永不 +1、首见行恒播 0（键型静默失效，仅扫码校准兜底）。目标站已有
+    99.0 基线、机台 100.0：导分成功后存量行必须 +1。"""
+    from test_updater import FakeUpdateProvider, mk_score, _make_client
+    from maimai_py.models import PlayerIdentifier
+
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    # 预置存量行（上次简略导分的种子 0）
+    await pc_store.observe(
+        "u-bridge", [mk_score(achievements=99.0, dx_score=1000)], [], anchored=False
+    )
+    assert [r.play_count for r in await pc_store.counts("u-bridge")] == [0]
+
+    client = await _make_client()
+    target = FakeUpdateProvider([mk_score(achievements=99.0, dx_score=1000)])
+    source = FakeUpdateProvider([mk_score(achievements=100.0, dx_score=2000)])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "水鱼"})]
+
+    async def pc_hook(source_scores, target_dicts):
+        await pc_store.observe("u-bridge", source_scores, target_dicts, anchored=False)
+
+    await run_update(client, src, targets, full=False, max_retries=0, pc_hook=pc_hook)
+
+    assert [r.play_count for r in await pc_store.counts("u-bridge")] == [1]
+
+
+async def test_pc_bridge_no_phantom_on_intersect_min(pc_store):
+    """交集谱各站基线不同（水鱼 99.5 / 落雪 99.0）时不得虚增（LOGIC-2 钉子）：
+
+    机台真值 99.5 与水鱼一致并非新游玩，桥接不得 +1——_join_rev 原地改写曾
+    把随返回值交出的水鱼基线拉低成 min 99.0，误判虚增。同时断言返回基线
+    == 各站原始值（L-10）。"""
+    from test_updater import FakeUpdateProvider, mk_score, _make_client
+    from maimai_py.models import PlayerIdentifier
+
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    key = (199, "dx", 3)
+    # 存量行：已按机台真值校准到 5 次
+    await pc_store.observe(
+        "u1",
+        [mk_score(achievements=99.5, dx_score=2000, play_count=5)],
+        [],
+        anchored=True,
+    )
+
+    client = await _make_client()
+    source = FakeUpdateProvider([mk_score(achievements=99.5, dx_score=2000)])
+    water = FakeUpdateProvider([mk_score(achievements=99.5, dx_score=2000)])
+    lxns = FakeUpdateProvider([mk_score(achievements=99.0, dx_score=2000)])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (water, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (lxns, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+
+    _skipped, _snapshot, baselines, _failures = await delta_updates_chain(
+        client, src, targets
+    )
+
+    # 返回基线 == 各站原始值（_join_rev 真拷贝，不污染输入）
+    assert baselines[0][key].achievements == 99.5
+    assert baselines[1][key].achievements == 99.0
+
+    await pc_store.observe(
+        "u1", [mk_score(achievements=99.5, dx_score=2000)], baselines, anchored=False
+    )
+    assert [r.play_count for r in await pc_store.counts("u1")] == [5]  # 无新游玩不 +1

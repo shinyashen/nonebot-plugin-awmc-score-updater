@@ -153,8 +153,12 @@ class PlayCount(SQLModel, table=True):
     play_count: int = 0
 
 
-def _row_key(row: PlayCount) -> tuple[int, str, int]:
-    """PC 表行 → 谱面键（行内 type/level_index 已是原始值，不再取 .value）。"""
+def row_key(row: PlayCount) -> tuple[int, str, int]:
+    """PC 表行 → 谱面键（行内 type/level_index 已是原始值，不再取 .value）。
+
+    与 ：func:`pc_key` 同构（谱面键的行侧读法），导出供 matchers 的 pc 列表
+    查询把行转回谱面键，避免第三处内联元组漂移。
+    """
     return (row.music_id, row.type, row.level_index)
 
 
@@ -209,7 +213,7 @@ class PlayCountStore:
             stmt = select(PlayCount).where(PlayCount.arcade_user_id == arcade_user_id)
             rows = (await session.exec(stmt)).all()
             existing: dict[tuple[int, str, int], PlayCount] = {
-                _row_key(r): r for r in rows
+                row_key(r): r for r in rows
             }
 
             if anchored:
