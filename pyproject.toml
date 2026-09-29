@@ -50,7 +50,9 @@ nonebug = { git = "https://github.com/nonebot/nonebug" }
 # 主插件仓库暂为私有且未上架 PyPI：开发环境以平级目录 path 依赖解析。
 # 作为 awmc_plugins/ 目录插件部署时由主插件直接加载，不走此解析；
 # 主插件公开/上架后改回 `nonebot-plugin-awmc-helper>=0.1.0` 版本依赖。
-nonebot-plugin-awmc-helper = { path = "../nonebot-plugin-awmc-helper" }
+# editable：开发期主插件工作区即所见（新增 core 模块免重装）；
+# 上架后整行改回版本依赖并删去本段
+nonebot-plugin-awmc-helper = { path = "../nonebot-plugin-awmc-helper", editable = true }
 
 [tool.nonebot]
 adapters = [{ name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }]
