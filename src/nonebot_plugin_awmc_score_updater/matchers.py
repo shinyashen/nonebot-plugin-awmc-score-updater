@@ -410,9 +410,13 @@ async def _(
         )
         await UniMessage.text(f" {msg}").finish(at_sender=True)
     targets, lx_note = _build_targets(binding)
-    if not targets and lx_note:
-        # 只有落雪绑定且为只读旧授权：无目标可导，直接引导重绑
-        await UniMessage.text(f" {lx_note}").finish(at_sender=True)
+    if not targets:
+        # 无目标可导：有落雪只读提示用之；否则（OAuth 标志在但 subject 派生
+        # 不出且无 Import-Token 等装配盲区）给通用引导——不能落进后面
+        # run_update 的「没有可用的成绩数据库」兜底误导已绑用户
+        await UniMessage.text(
+            f" {lx_note or '当前绑定没有可用的导出目标，请检查水鱼/落雪绑定'}"
+        ).finish(at_sender=True)
 
     wb = await wechat_store.get(platform, user_id)
     if wb is None or not wb.arcade_user_id:

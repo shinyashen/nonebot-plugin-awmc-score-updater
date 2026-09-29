@@ -950,6 +950,36 @@ async def test_qq_only_binding_rejected(app: App, stores):
     )
 
 
+async def test_update_cmd_empty_targets_generic_hint(app: App, stores):
+    """空目标且无落雪提示 → 通用引导而非误导兜底（L-21）：
+
+    OAuth 标志在但 subject 派生不出（部署未配水鱼 OAuth 应用，external_id
+    换不来摘要）且无 Import-Token——此前漏过空目标判定，落进 run_update 的
+    「没有可用的成绩数据库」兜底，而用户明明完成过绑定。"""
+    from fake import fake_private_message_event_v11
+    from sqlmodel.ext.asyncio.session import AsyncSession
+    from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    async with AsyncSession(get_engine()) as session:
+        session.add(
+            UserBinding(
+                platform="OneBot V11", user_id="12345678", divingfish_oauth=True
+            )
+        )
+        await session.commit()
+
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    await _send(
+        app,
+        matchers.update_cmd,
+        event,
+        "当前绑定没有可用的导出目标，请检查水鱼/落雪绑定",
+        private=True,
+    )
+
+
 async def _prepare_partial_failure_env(app, monkeypatch, fake_run_update):
     """部分失败用例公共前置：绑定齐备 + SaltNet 拉取 mock + 传分打桩。"""
     from fake import fake_private_message_event_v11
