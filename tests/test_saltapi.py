@@ -84,6 +84,39 @@ async def test_parse_qrcode_all_down():
         await parse_qrcode(QR64, main_url=MAIN, fallback_url=FALLBACK)
 
 
+@respx.mock
+async def test_parse_qrcode_html_body_falls_back():
+    """200+HTML（网关劫持页）→ JSONDecodeError 不逃出 SaltApiError 语义，
+    按该域名失败继续试备域（L-17）。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import parse_qrcode
+
+    respx.post(f"{MAIN}/getQRInfo").mock(
+        return_value=Response(200, text="<html>gateway error</html>")
+    )
+    respx.post(f"{FALLBACK}/getQRInfo").mock(
+        return_value=Response(200, json={"errorID": 0, "userID": "77"})
+    )
+    assert await parse_qrcode(QR64, main_url=MAIN, fallback_url=FALLBACK) == "77"
+
+
+@respx.mock
+async def test_fetch_score_payload_html_body_raises_saltapi_error():
+    """200+HTML → 立即抛 SaltApiError（计入失败、不试备域），JSONDecodeError
+    不再白跑 run_update 的 3 轮退避后落通用兜底（L-17）。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import (
+        SaltApiError,
+        fetch_score_payload,
+    )
+
+    respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(200, text="<html>gateway error</html>")
+    )
+    fallback = respx.post(f"{FALLBACK}/updateUser").mock(return_value=Response(200))
+    with pytest.raises(SaltApiError, match="非 JSON"):
+        await fetch_score_payload("42", None, main_url=MAIN, fallback_url=FALLBACK)
+    assert not fallback.called
+
+
 def _detail(
     music_id: int, level: int = 3, achievement: int = 1005000, combo: int = 0
 ) -> dict:
