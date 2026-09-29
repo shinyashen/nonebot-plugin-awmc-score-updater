@@ -25,6 +25,7 @@ from maimai_py.exceptions import (
     InvalidJsonError,
     PrivacyLimitationError,
     PlayerNotAuthorizedError,
+    InvalidDeveloperTokenError,
     InvalidPlayerIdentifierError,
 )
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
@@ -233,6 +234,10 @@ def _failure_hint(name: str, exc: Exception) -> str:
         if name == "水鱼":
             return "水鱼 Import-Token 已失效，请到主插件重新绑定"
         return f"{name}凭据已失效，请重新「绑定{name}」"
+    if isinstance(exc, InvalidDeveloperTokenError):
+        # 1.6.0 起 dev 端点已从库中删除，此异常只剩 OAuth 应用凭据缺失/无效
+        # 一类部署问题（文案与主插件 core.score 同口径）
+        return "水鱼 OAuth 应用凭据无效或缺失，请联系管理员检查部署配置"
     if isinstance(exc, PrivacyLimitationError):
         return f"未同意{name}的相关用户协议，无法完成该操作"
     if isinstance(exc, InvalidJsonError):
@@ -491,25 +496,19 @@ async def _(
                 notify_slow=notify_slow,
                 pc_hook=pc_hook,
             )
-        except InvalidPlayerIdentifierError:
-            await UniMessage.text(
-                " 成绩导入 token 无效，请到主插件重新绑定水鱼/落雪 token"
-            ).finish(at_sender=True)
-        except PlayerNotAuthorizedError:
-            await UniMessage.text(
-                " 水鱼已要求所有成绩写入走 OAuth 授权："
-                "请发送「绑定水鱼」完成一次授权后重试"
-            ).finish(at_sender=True)
-        except PrivacyLimitationError:
-            await UniMessage.text(
-                " 你没有同意数据站的相关用户协议，无法完成该操作"
-            ).finish(at_sender=True)
-        except InvalidJsonError:
-            # 数据站返回非 JSON（500 HTML 等）：多见于凌晨维护窗口，
-            # 服务端问题非本插件故障
-            await UniMessage.text(
-                " 数据站服务暂时不可用（可能维护中），成绩可能已部分上传，请稍后再试"
-            ).finish(at_sender=True)
+        except (
+            InvalidPlayerIdentifierError,
+            PlayerNotAuthorizedError,
+            PrivacyLimitationError,
+            InvalidJsonError,
+            RateLimitError,
+            InvalidDeveloperTokenError,
+        ) as exc:
+            # 整链失败与部分失败共用 _failure_hint 单一映射（T-13，防两套文案
+            # 漂移）；目标名读链内挂的归属标签（FAIL_TARGET_ATTR），无标签
+            # （理论不可达，run_update 直抛等）退回中性「数据站」
+            name = getattr(exc, FAIL_TARGET_ATTR, None) or "数据站"
+            await UniMessage.text(f" {_failure_hint(name, exc)}").finish(at_sender=True)
 
         await wechat_store.set_last_update(
             platform, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")

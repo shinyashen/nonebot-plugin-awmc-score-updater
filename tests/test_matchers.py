@@ -1065,6 +1065,49 @@ async def test_partial_failure_plain_reply(app: App, stores, monkeypatch):
         )
 
 
+@respx.mock
+async def test_update_cmd_rate_limit_whole_chain_reply(app: App, stores, monkeypatch):
+    """整链失败映射收口回归（L-13/T-13）：纯水鱼配额用尽（RateLimitError 整链
+    上抛，异常带链内归属标签）→ 用户收到配额文案——修复前整链 except 漏
+    RateLimitError，落 handle_errors 的通用「出错了」，而「配额用尽」只在
+    部分失败态可达。"""
+    from maimai_py.exceptions import RateLimitError
+
+    from nonebot_plugin_awmc_score_updater import matchers
+    from nonebot_plugin_awmc_score_updater.updater import FAIL_TARGET_ATTR
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        exc = RateLimitError("quota exceeded")
+        setattr(exc, FAIL_TARGET_ATTR, "水鱼")
+        raise exc
+
+    event_factory = await _prepare_partial_failure_env(
+        app, monkeypatch, fake_run_update
+    )
+    event = event_factory(message="传分", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("正在上传分数，请稍等...")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("水鱼今日请求配额已用完，请明天再试")]),
+            result=None,
+            bot=bot,
+        )
+
+
 @pytest.mark.asyncio
 async def test_run_with_refresh_partial_lxns_401_renewed(monkeypatch):
     """部分失败续期（新路径）：他站成功 + 落雪 401 进失败列表 → 续期后重试
