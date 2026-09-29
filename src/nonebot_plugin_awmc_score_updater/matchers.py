@@ -57,9 +57,11 @@ from nonebot_plugin_awmc_helper.core.client import (
     divingfish_provider,
 )
 from nonebot_plugin_awmc_helper.core.binding import (
+    at_tolerant,
     session_keys,
     binding_service,
     service_display,
+    resolve_query_binding,
 )
 from nonebot_plugin_awmc_helper.core.forward import try_send_forward
 from nonebot_plugin_awmc_helper.core.render.score import DrawScore, score_list_height
@@ -77,7 +79,7 @@ bindwx_cmd = on_command("绑定微信", aliases={"bindwx", "微信绑定"}, bloc
 # 分数前缀与主插件分数列表同口径（DS_RE 同款）：整数=标级（13、13+），
 # 小数=定数（13.0）；13pc列表 即标级 13 全部谱面（定数 13.0-13.5）的 pc 排行
 pc_list_cmd = on_regex(
-    r"^([0-9]+(?:\.[0-9]+)?\+?)\s?pc列表\s?([0-9]+)?$",
+    at_tolerant(r"^([0-9]+(?:\.[0-9]+)?\+?)\s?pc列表\s?([0-9]+)?$"),
     block=True,
 )
 pc50_cmd = on_command("pc50", aliases={"PC50"}, block=True)
@@ -565,6 +567,7 @@ async def _(
 @handle_errors("查询失败", except_with_message=(UserScoreError,))
 async def _(
     session: Session = UniSession(),
+    event: Event | None = None,
     groups: tuple = RegexGroup(),
 ):
     """<定数/等级>pc列表：游玩次数降序成绩列表（行卡副行 pc: N，复用主插件版式）。
@@ -572,20 +575,24 @@ async def _(
     分数前缀处理与主插件分数列表一致：带小数点按定数匹配（13.0），否则按
     标级匹配（13 / 13+）；宴谱按其定数（.0/.7）自然入列。成绩展示字段来自
     当前数据源，次数来自本插件 play_count 表——次数采集自国服机台导分，
-    故日服（jp 视图）数据源整链不可用（:meth:`_finish_if_jp_view` 入口拦截）。
+    故日服（jp 视图）数据源整链不可用（:meth:`_finish_if_jp_view` 入口拦截）；
+    支持 @某人 代查（绑定/微信/pc 数据均取查询目标，2026-09-30）。
     """
     ds_raw, page_raw = groups
     page = parse_page(page_raw)
     platform, user_id = session_keys(session)
 
-    binding = await binding_service.ensure(platform, user_id)
+    # @ 代查（2026-09-30）：绑定/微信/pc 数据全部取查询目标（at 只读解析）
+    binding, at_target = await resolve_query_binding(session, event)
     await _finish_if_jp_view(binding)
+    target_id = at_target or user_id
+    who = "对方" if at_target else ""
 
     # 微信绑定与 pc 数据的前置检查先于全量成绩拉取（对齐 pc50 顺序）：
     # 未绑微信/从未导分的用户不必白等数据站的慢查询
-    wb = await wechat_store.get(platform, user_id)
+    wb = await wechat_store.get(platform, target_id)
     if wb is None or not wb.arcade_user_id:
-        await UniMessage.text(" 尚未绑定微信二维码，暂无游玩次数数据").finish(
+        await UniMessage.text(f" {who}尚未绑定微信二维码，暂无游玩次数数据").finish(
             at_sender=True
         )
     pc_map = {
@@ -594,7 +601,7 @@ async def _(
     }
     if not pc_map:
         await UniMessage.text(
-            " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+            f" {who}暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
         ).finish(at_sender=True)
 
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
@@ -640,6 +647,7 @@ async def _(
 @handle_errors("查询失败", except_with_message=(UserScoreError,))
 async def _(
     session: Session = UniSession(),
+    event: Event | None = None,
 ):
     """pc50：游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）。
 
@@ -649,15 +657,19 @@ async def _(
     格式）。pc 表值为 0 的种子行（导分桥接未知次数）不入榜。头部 rating
     三数字沿用模板占位口径（所列成绩 RA 之和，与 ap50 一致）。次数采集自
     国服机台导分，故日服（jp 视图）数据源整链不可用
-    （:meth:`_finish_if_jp_view` 入口拦截），且需先「导」过。
+    （:meth:`_finish_if_jp_view` 入口拦截），且需先「导」过；
+    支持 @某人 代查（绑定/微信/pc 数据均取查询目标，2026-09-30）。
     """
     platform, user_id = session_keys(session)
 
-    binding = await binding_service.ensure(platform, user_id)
+    # @ 代查（2026-09-30）：绑定/微信/pc 数据全部取查询目标（at 只读解析）
+    binding, at_target = await resolve_query_binding(session, event)
     await _finish_if_jp_view(binding)
-    wb = await wechat_store.get(platform, user_id)
+    target_id = at_target or user_id
+    who = "对方" if at_target else ""
+    wb = await wechat_store.get(platform, target_id)
     if wb is None or not wb.arcade_user_id:
-        await UniMessage.text(" 尚未绑定微信二维码，暂无游玩次数数据").finish(
+        await UniMessage.text(f" {who}尚未绑定微信二维码，暂无游玩次数数据").finish(
             at_sender=True
         )
     pc_map = {
@@ -666,14 +678,14 @@ async def _(
     }
     if not pc_map:
         await UniMessage.text(
-            " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+            f" {who}暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
         ).finish(at_sender=True)
 
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
     rows = [s for s in scores.scores if pc_map.get(pc_key(s), 0) > 0]
     if not rows:
         await UniMessage.text(
-            " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+            f" {who}暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
         ).finish(at_sender=True)
     bests = build_bests(
         rows,
@@ -738,13 +750,13 @@ help_registry.declare(
             name="pc50",
             aliases=("PC50",),
             scope="仅国服数据源",
-            brief="游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式）",
+            brief="游玩次数 Top50（旧版本 35 + 新版本 15，B50 版式；@某人=代查）",
         ),
         CommandSpec(
             matcher=pc_list_cmd,
             name="<等级|定数>pc列表",
             scope="仅国服数据源",
-            brief="游玩次数排行（口径同主插件分数列表，支持页码）",
+            brief="游玩次数排行（口径同主插件分数列表，支持页码；@某人=代查）",
             detail="整数=标级（13pc列表），小数=定数（13.0pc列表）。",
         ),
     ],
