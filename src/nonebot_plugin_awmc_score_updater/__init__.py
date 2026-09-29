@@ -39,7 +39,8 @@ __plugin_meta__ = PluginMetadata(
         "导/传分/上传分数 [二维码内容] 上传成绩（全量上传仅私聊或白名单群）；"
         "13pc列表/13.0pc列表 查看游玩次数排行（标级/定数前缀与主插件分数列表"
         "同口径，支持页码）。"
-        "水鱼/落雪 token 请先用 awmc-helper 主插件绑定。"
+        "水鱼/落雪 token 请先用 awmc-helper 主插件绑定。\n"
+        "分步帮助：导帮助/传分帮助/上传分数帮助，或主插件「舞萌帮助 导分」。"
     ),
     type="application",
     homepage="https://github.com/shinyashen/nonebot-plugin-awmc-score-updater",
