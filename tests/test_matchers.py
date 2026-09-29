@@ -1435,12 +1435,7 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     monkeypatch.setattr(
         matchers,
         "score_service",
-        SimpleNamespace(
-            get_scores_all=fake_get_scores_all,
-            get_player=fake_get_player,
-            view_of=lambda _s: "cn",
-            needs_fetch=lambda _b: False,
-        ),
+        SimpleNamespace(get_scores_all=fake_get_scores_all, get_player=fake_get_player),
     )
     captured = {}
 
@@ -1497,22 +1492,17 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pc50_net_branch(app: App, stores, monkeypatch):
-    """pc50 NET 分支：抓取提示先行 → 日服现行版本分侧（27000 MAGiCAL 为
-    新版本侧下界）→ net_best50_card 身份卡（不触查分器 get_player）。"""
-    from types import SimpleNamespace
-    from base64 import b64encode as b64
-
+async def test_pc_commands_jp_gate(app: App, stores):
+    """pc50/pc列表 日服（jp 视图）数据源入口门禁：入口即拦，先于微信/pc
+    前置检查（NET 无权威游玩次数数据源，2026-09-30 拍板不立项）。"""
     import nonebot
     from fake import fake_private_message_event_v11
-    from maimai_py import SongType
     from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
     from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
     from sqlmodel.ext.asyncio.session import AsyncSession
     from nonebot_plugin_awmc_helper.core.store import UserBinding, get_engine
 
     from nonebot_plugin_awmc_score_updater import matchers
-    from nonebot_plugin_awmc_score_updater.store import play_count_store
 
     async with AsyncSession(get_engine()) as session:
         session.add(
@@ -1524,78 +1514,28 @@ async def test_pc50_net_branch(app: App, stores, monkeypatch):
             )
         )
         await session.commit()
-    await _bind_wechat("888")
 
-    rows = [
-        _mk_ext(199, version=27000, ra=150),  # MAGiCAL → NET 口径新版本侧
-        _mk_ext(
-            199,
-            typ=SongType.STANDARD,
-            ach=98.0,
-            level_value=13.3,
-            version=12000,
-            ra=120,
-        ),
-        _mk_ext(
-            8,
-            typ=SongType.STANDARD,
-            level="12",
-            level_value=12.4,
-            version=10000,
-            ra=100,
-        ),
-    ]
-
-    async def fake_get_scores_all(binding, notify_slow=None):
-        return SimpleNamespace(scores=rows)
-
-    monkeypatch.setattr(
-        matchers,
-        "score_service",
-        SimpleNamespace(
-            get_scores_all=fake_get_scores_all,
-            view_of=lambda _s: "jp",
-            needs_fetch=lambda _b: True,
-        ),
+    gate_msg = (
+        "游玩次数排行仅支持国服数据源（次数采集自国服机台导分），"
+        "日服 NET 暂不支持该指令"
     )
-    captured = {}
-
-    async def fake_net_card(bests, binding, *, sub_of=None):
-        captured.update(bests=bests, binding=binding, sub_of=sub_of)
-        return b"png"
-
-    monkeypatch.setattr(matchers, "net_best50_card", fake_net_card)
-
-    await play_count_store.observe(
-        "888",
-        [
-            _mk_pc(199, 5),
-            _mk_pc(199, 3, typ=SongType.STANDARD),
-            _mk_pc(8, 9, typ=SongType.STANDARD),
-        ],
-        [],
-        anchored=True,
+    cases = (
+        (matchers.pc50_cmd, "pc50"),
+        (matchers.pc_list_cmd, "13pc列表"),
     )
-
-    event = fake_private_message_event_v11(message="pc50", user_id=12345678, to_me=True)
-    async with app.test_matcher(matchers.pc50_cmd) as ctx:
-        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
-        ctx.receive_event(bot, event)
-        ctx.should_call_send(
-            event,
-            Message([MessageSegment.text("正在登录日服 NET 抓取成绩，请稍候…")]),
-            result=None,
-            bot=bot,
+    for matcher, message in cases:
+        event = fake_private_message_event_v11(
+            message=message, user_id=12345678, to_me=True
         )
-        ctx.should_call_send(
-            event,
-            Message([MessageSegment.image(f"base64://{b64(b'png').decode()}")]),
-            result=None,
-            bot=bot,
-        )
-
-    assert captured["binding"].service == "net"
-    # 版本分侧按日服现行版本（27000）：199 DX MAGiCAL → b15，其余 → b35
-    assert [s.id for s in captured["bests"].scores_b15] == [199]
-    assert [s.id for s in captured["bests"].scores_b35] == [8, 199]  # pc 9>3
-    assert captured["sub_of"](captured["bests"].scores_b35[0]) == "pc: 9"
+        async with app.test_matcher(matcher) as ctx:
+            bot = ctx.create_bot(
+                base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter)
+            )
+            ctx.receive_event(bot, event)
+            ctx.should_call_send(
+                event,
+                Message([MessageSegment.text(gate_msg)]),
+                result=None,
+                bot=bot,
+            )
+            ctx.should_finished()
