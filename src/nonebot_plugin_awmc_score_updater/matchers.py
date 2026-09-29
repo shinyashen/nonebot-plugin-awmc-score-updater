@@ -600,9 +600,8 @@ async def _(
     page = parse_page(page_raw)
     platform, user_id = session_keys(session)
 
-    binding = await binding_service.ensure(*session_keys(session))
-    scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
-
+    # 微信绑定与 pc 数据的前置检查先于全量成绩拉取（对齐 pc50 顺序）：
+    # 未绑微信/从未导分的用户不必白等数据站的慢查询
     wb = await wechat_store.get(platform, user_id)
     if wb is None or not wb.arcade_user_id:
         await UniMessage.text(" 尚未绑定微信二维码，暂无游玩次数数据").finish(
@@ -616,6 +615,9 @@ async def _(
         await UniMessage.text(
             " 暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
         ).finish(at_sender=True)
+
+    binding = await binding_service.ensure(platform, user_id)
+    scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
 
     # 分数前缀同主插件分数列表口径：带小数点=定数，否则=标级；
     # 宴谱按其定数（.0/.7）自然入列
