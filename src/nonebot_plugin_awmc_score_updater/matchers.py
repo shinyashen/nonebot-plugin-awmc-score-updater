@@ -10,7 +10,6 @@
 
 import asyncio
 from typing import Any
-from pathlib import Path
 from datetime import datetime
 
 from nonebot import on_regex, on_command
@@ -71,11 +70,6 @@ from .store import pc_key, row_key, wechat_store, play_count_store
 from .config import plugin_config
 from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
 from .updater import FAIL_TARGET_ATTR, SaltArcadeProvider, run_update
-
-# 水鱼 Import-Token 获取位置的引导截图（assets/import_token.jpg，沿用
-# Hoshino 原版素材）；帮助文案全部迁入主插件帮助注册表（M10「导分」指南）
-_IMPORT_TOKEN_IMG = Path(__file__).parent / "assets" / "import_token.jpg"
-
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
 help_cmd = on_command("导帮助", aliases={"传分帮助", "上传分数帮助"}, block=True)
@@ -356,7 +350,7 @@ async def _(
     if parts == ["帮助"]:
         _g = help_registry.guides["导分"]
         await UniMessage.text(
-            f"{_g.intro}\n前置条件：{_g.prerequisites}\n发送「导帮助」查看分步流程（附水鱼引导图）"
+            f"{_g.intro}\n前置条件：{_g.prerequisites}\n发送「导帮助」查看分步流程"
         ).finish(at_sender=True)
     qr_input = parts[0] if parts else None
 
@@ -516,19 +510,17 @@ async def _(
 @help_cmd.handle()
 @handle_errors()
 async def _(bot: Bot, session: Session = UniSession()):
-    # OneBot v11 合并转发（M10「导分」指南页，水鱼步骤附引导图）；失败或
-    # 其他适配器降级为文字渲染图片 + 引导图（纯文本字数过多）
+    # OneBot v11 合并转发（M10「导分」指南页）；失败或其他适配器降级为
+    # 文字渲染图片（纯文本字数过多）
     page = GuidePage(guide=help_registry.guides["导分"])
     entries = page_entries(help_registry, page)
     group_id = str(session.scene.id) if session.scene.type == SceneType.GROUP else None
     user_id = None if group_id else str(session.user.id)
     if await try_send_forward(bot, entries, group_id=group_id, user_id=user_id):
         return
-    guide = UniMessage.image(
+    await UniMessage.image(
         raw=image_to_bytes(text_to_image(page_text(help_registry, page)))
-    )
-    guide += UniMessage.image(raw=_IMPORT_TOKEN_IMG.read_bytes())
-    await guide.finish(at_sender=True)
+    ).finish(at_sender=True)
 
 
 @bindwx_cmd.handle()
@@ -691,7 +683,7 @@ async def _(
 
 # ---------------------------------------------------------------- 帮助声明
 # 指令按功能就近入主插件类别（M10 拍板⑦）：绑定微信→绑定、pc 排行→查分、
-# 导→工具；「导分」指南为流程轴首个真实消费者（水鱼步骤附引导图）
+# 导→工具；「导分」指南为流程轴首个真实消费者
 
 _SU_PLUGIN = "nonebot_plugin_awmc_score_updater"
 
@@ -773,11 +765,9 @@ help_registry.declare_guide(
                     "绑定水鱼（OAuth 授权——写成绩的唯一途径）："
                     "发「绑定水鱼」按引导完成设备码授权即可导分。\n"
                     "Import-Token 仅剩读取基线价值（写入会失败并提示授权），"
-                    "需要全量成绩/牌子读取时才绑。"
-                    "下图引导：水鱼查分器个人页 → 设置 → 生成 Import-Token"
+                    "需要全量成绩/牌子读取时才发「绑定水鱼token」绑定。"
                 ),
                 commands=("绑定水鱼", "绑定水鱼token"),
-                image=_IMPORT_TOKEN_IMG,
             ),
             GuideStep(
                 text=(
