@@ -73,7 +73,12 @@ async def parse_qrcode(qr_code: str, *, main_url: str, fallback_url: str) -> str
             continue
         if resp.status_code != 200:
             continue
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            # 200+HTML（网关劫持页/反代错误页）：按该域名失败继续试备域
+            # （与非 200 同语义），不能让 JSONDecodeError 逃出 SaltApiError 语义
+            continue
         if data.get("errorID") == 0:
             user_id = data.get("userID")
             # errorID=0 但缺 userID（网关异常响应）：按业务失败返回 None，
@@ -106,7 +111,13 @@ async def fetch_score_payload(
         if resp.status_code != 200:
             last_status = resp.status_code
             continue
-        raw = resp.json()
+        try:
+            raw = resp.json()
+        except ValueError as e:
+            # 200+HTML（网关劫持页）：立即计为失败并保持 SaltApiError 语义，
+            # 不再试备域——此类页面经同一反代/出口，主备同现，逐域重试只会
+            # 叠加 run_update 的退避轮次白跑
+            raise SaltApiError("成绩拉取响应非 JSON（网关异常），请稍后再试") from e
         return [
             music
             for entry in raw.get("userMusicList", [])
