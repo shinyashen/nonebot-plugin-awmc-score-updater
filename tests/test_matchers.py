@@ -1700,3 +1700,56 @@ async def test_pc50_at_target(app: App, stores, monkeypatch):
     assert captured["kw"]["qqid"] == 99999999  # 卡面身份 = at 目标
     assert [s.id for s in captured["b35"]] == [8]  # 曲 8（v10000 旧版本侧）
     assert [s.id for s in captured["b15"]] == [199]  # 曲 199（v26000 新版本侧）
+
+
+@pytest.mark.asyncio
+async def test_pc_list_at_trailing_space_target_unbound(app: App, stores):
+    """@代查回归（2026-09-30 线上实测）：消息形状原样取自服务器日志
+    （尾随空格 + name 数据键）；目标未绑微信 → 「对方」提示。"""
+    import nonebot
+    from fake import fake_group_message_event_v11
+    from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+    from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    event = fake_group_message_event_v11(
+        message=Message(
+            [
+                MessageSegment.text("14+pc列表"),
+                MessageSegment("at", {"qq": "1751599183", "name": "薯条"}),
+                MessageSegment.text(" "),
+            ]
+        ),
+        user_id=12345678,
+    )
+    async with app.test_matcher(matchers.pc_list_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_api(
+            "get_group_info",
+            {"group_id": 87654321},
+            result={
+                "group_id": 87654321,
+                "group_name": "g",
+                "member_count": 1,
+                "max_member_count": 10,
+            },
+        )
+        ctx.should_call_api(
+            "get_group_member_info",
+            {"group_id": 87654321, "user_id": 12345678, "no_cache": True},
+            result={"user_id": 12345678, "role": "member", "card": "", "nickname": "t"},
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.at(12345678),
+                    MessageSegment.text(" 对方尚未绑定微信二维码，暂无游玩次数数据"),
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_finished()
