@@ -806,7 +806,9 @@ async def test_delta_chain_full_mode_invalid_json_goes_failures(songs):
     )
 
     assert skipped == 0  # 不得虚报「因未收录跳过」
-    assert [(n, type(e).__name__) for n, e in failures] == [("水鱼", "InvalidJsonError")]
+    assert [(n, type(e).__name__) for n, e in failures] == [
+        ("水鱼", "InvalidJsonError")
+    ]
     assert broken.update_calls == 1  # 无重传（重传需目标基线，全量模式不可用）
     assert [s.id for s in healthy.updates[0]] == [199]  # 健康站照常收到上传
 

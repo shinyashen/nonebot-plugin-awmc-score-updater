@@ -1769,3 +1769,37 @@ async def test_pc_list_at_trailing_space_target_unbound(app: App, stores):
             bot=bot,
         )
         ctx.should_finished()
+
+
+@pytest.mark.asyncio
+async def test_wechat_bind_concurrent_first_bind(monkeypatch):
+    """并发首绑双 INSERT 竞态（复审补，镜像主插件 binding.ensure 同款测试）：
+    后 commit 方撞复合主键 → 捕 IntegrityError 重读后覆盖更新，两协程都
+    成功且库里恰好一行。"""
+    import asyncio
+
+    from nonebot_plugin_awmc_score_updater.store import wechat_store
+
+    platform, user_id = "OneBot V11", "77700077"
+    real_query = wechat_store._query
+    state = {"i": 0}
+    ready = (asyncio.Event(), asyncio.Event())
+
+    async def gated_query(session, plat, uid):
+        """前两查模拟「双方都看到空表」：互等放行后再各自 INSERT。"""
+        i = state["i"]
+        state["i"] += 1
+        if i < 2:
+            ready[i].set()
+            await ready[1 - i].wait()
+            return None
+        return await real_query(session, plat, uid)
+
+    monkeypatch.setattr(type(wechat_store), "_query", staticmethod(gated_query))
+    await asyncio.gather(
+        wechat_store.bind(platform, user_id, "user-a"),
+        wechat_store.bind(platform, user_id, "user-b"),
+    )
+    row = await wechat_store.get(platform, user_id)
+    assert row is not None
+    assert row.arcade_user_id in ("user-a", "user-b")  # 胜者行 + 竞态败方覆盖写入

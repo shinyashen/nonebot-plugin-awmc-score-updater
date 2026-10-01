@@ -200,9 +200,9 @@ async def _gather(
     （callback 通知后以空成绩占位），但整体 gather 遇到异常仍会向上传播
     ——由 run_update 的重试循环兜底。
 
-    ⚠️ ``mode`` 的 fallback 分支仅为对齐上游 ``updates_chain`` 签名保留
-    （生产唯一调用方 run_update 恒传 parallel），直调本函数才可达。
-    """
+    ⚠️ ``mode`` 的 fallback 分支生产路径不可达（run_update 恒显式传
+    parallel）；不传 source_mode 直调 ``delta_updates_chain`` 同样落到
+    fallback——单源场景两模式行为一致，多源时 fallback 只排第一个。"""
     tasks = []
     for sp, ident, kwargs in providers:
         if ident is None:
@@ -339,7 +339,8 @@ async def delta_updates_chain(
     # 水鱼未收录新曲的成绩会让 update_records 服务端 500（2026-09-26 线上实测：
     # 空载荷 200、含未收录曲目 id 的载荷 500）。过滤基准 = 目标已有成绩出现过的
     # 曲目 id（目标确认收录）；500 后自动降级为仅传已收录部分并报告跳过数。
-    # 全量模式不拉取目标、降级不可用，未收录直接报错（与原 updates_chain 一致）。
+    # 全量模式不拉取目标、降级不可用：InvalidJsonError 按目标进 failures
+    # （部分成功语义），单目标全败才整链上抛（与原 updates_chain 一致）。
     known_song_ids = {score.id % 10000 for d in target_dicts for score in d.values()}
     skipped_unknown = 0
 
