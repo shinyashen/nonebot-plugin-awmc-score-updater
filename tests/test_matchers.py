@@ -845,7 +845,11 @@ async def test_pc_list_unbound_wechat_hint(app: App, stores, monkeypatch):
         return SimpleNamespace(scores=[])
 
     monkeypatch.setattr(
-        matchers, "score_service", SimpleNamespace(get_scores_all=fake_get_scores_all)
+        matchers,
+        "score_service",
+        SimpleNamespace(
+            get_scores_all=fake_get_scores_all, view_of=lambda _service: "cn"
+        ),
     )
     event = fake_private_message_event_v11(
         message="13pc列表", user_id=12345678, to_me=True
@@ -874,7 +878,11 @@ async def test_pc_list_no_data_hint(app: App, stores, monkeypatch):
         return SimpleNamespace(scores=[])
 
     monkeypatch.setattr(
-        matchers, "score_service", SimpleNamespace(get_scores_all=fake_get_scores_all)
+        matchers,
+        "score_service",
+        SimpleNamespace(
+            get_scores_all=fake_get_scores_all, view_of=lambda _service: "cn"
+        ),
     )
     event = fake_private_message_event_v11(
         message="13pc列表", user_id=12345678, to_me=True
@@ -1435,7 +1443,11 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     monkeypatch.setattr(
         matchers,
         "score_service",
-        SimpleNamespace(get_scores_all=fake_get_scores_all, get_player=fake_get_player),
+        SimpleNamespace(
+            get_scores_all=fake_get_scores_all,
+            get_player=fake_get_player,
+            view_of=lambda _service: "cn",
+        ),
     )
     captured = {}
 
@@ -1646,7 +1658,11 @@ async def test_pc50_at_target(app: App, stores, monkeypatch):
     monkeypatch.setattr(
         matchers,
         "score_service",
-        SimpleNamespace(get_scores_all=fake_get_scores_all, get_player=fake_get_player),
+        SimpleNamespace(
+            get_scores_all=fake_get_scores_all,
+            get_player=fake_get_player,
+            view_of=lambda _service: "cn",
+        ),
     )
     captured = {}
 

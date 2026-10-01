@@ -199,6 +199,9 @@ async def _gather(
     ``configure`` 扩展见模块 docstring）。单个提供器失败不会中断整批
     （callback 通知后以空成绩占位），但整体 gather 遇到异常仍会向上传播
     ——由 run_update 的重试循环兜底。
+
+    ⚠️ ``mode`` 的 fallback 分支仅为对齐上游 ``updates_chain`` 签名保留
+    （生产唯一调用方 run_update 恒传 parallel），直调本函数才可达。
     """
     tasks = []
     for sp, ident, kwargs in providers:
@@ -391,7 +394,9 @@ async def delta_updates_chain(
     await _schedule_upload(delta_scores)
     results = await asyncio.gather(*upload_tasks, return_exceptions=True)
 
-    if any(isinstance(r, InvalidJsonError) for r in results):
+    # 全量模式（compare_target=False）无 known_song_ids（不拉目标）：过滤集
+    # 恒空、重传不可用——InvalidJsonError 全走 failures，不得虚报 skipped
+    if compare_target and any(isinstance(r, InvalidJsonError) for r in results):
         filtered = [s for s in delta_scores if s.id % 10000 in known_song_ids]
         skipped_unknown = len(delta_scores) - len(filtered)
         if filtered and skipped_unknown:

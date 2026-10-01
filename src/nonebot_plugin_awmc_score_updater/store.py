@@ -22,6 +22,7 @@ from datetime import datetime
 from pydantic import NaiveDatetime
 from sqlmodel import Field, SQLModel, select
 from nonebot.log import logger
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from maimai_py.models import Score
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -102,19 +103,33 @@ class WechatStore:
             return await self._query(session, platform, user_id)
 
     async def bind(self, platform: str, user_id: str, arcade_user_id: str) -> None:
-        """绑定/换绑微信 userID（已有记录则覆盖，保留 last_update）。"""
+        """绑定/换绑微信 userID（已有记录则覆盖，保留 last_update）。
+
+        并发首绑双 INSERT 竞态对齐主插件 ``binding.ensure``：败方捕
+        IntegrityError 重读后覆盖更新（两方 userID 同源同一二维码，内容
+        一致）；重读仍无行则原样上抛（非竞态异常不吞）。
+        """
         async with AsyncSession(get_engine()) as session:
             if row := await self._query(session, platform, user_id):
                 row.arcade_user_id = arcade_user_id
-            else:
-                session.add(
-                    WechatBinding(
-                        platform=platform,
-                        user_id=user_id,
-                        arcade_user_id=arcade_user_id,
-                    )
+                await session.commit()
+                return
+            session.add(
+                WechatBinding(
+                    platform=platform,
+                    user_id=user_id,
+                    arcade_user_id=arcade_user_id,
                 )
-            await session.commit()
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                if row := await self._query(session, platform, user_id):
+                    row.arcade_user_id = arcade_user_id
+                    await session.commit()
+                else:
+                    raise
 
     async def set_last_update(self, platform: str, user_id: str, when: str) -> None:
         """记录上次成功传分时间。"""

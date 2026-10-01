@@ -768,6 +768,49 @@ async def test_delta_chain_invalid_json_retry_narrowed_to_failed_targets(songs):
     assert [s.id for s in water.updates[0]] == [199]
 
 
+async def test_delta_chain_full_mode_invalid_json_goes_failures(songs):
+    """全量模式（compare_target=False）InvalidJsonError 走 failures 不虚报
+    skipped：无目标基线时过滤集恒空、重传不可用——旧实现把整批计成
+    skipped_unknown（口径失真）且静默不重传。"""
+    from maimai_py.exceptions import InvalidJsonError
+
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [mk_score(song_id=199, achievements=100.0, dx_score=2500)]
+    )
+
+    class JsonBrokenProvider(FakeUpdateProvider):
+        """上传恒抛 InvalidJsonError。"""
+
+        def __init__(self):
+            super().__init__([])
+            self.update_calls = 0
+
+        async def update_scores(self, identifier, scores, client):
+            self.update_calls += 1
+            raise InvalidJsonError("<html>500</html>")
+
+    broken = JsonBrokenProvider()
+    healthy = FakeUpdateProvider([])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    # 双目标：单目标全失败会整链上抛，配一个健康站承载部分成功语义
+    targets = [
+        (broken, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (healthy, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+
+    skipped, _, _, failures = await delta_updates_chain(
+        client, src, targets, compare_target=False
+    )
+
+    assert skipped == 0  # 不得虚报「因未收录跳过」
+    assert [(n, type(e).__name__) for n, e in failures] == [("水鱼", "InvalidJsonError")]
+    assert broken.update_calls == 1  # 无重传（重传需目标基线，全量模式不可用）
+    assert [s.id for s in healthy.updates[0]] == [199]  # 健康站照常收到上传
+
+
 async def test_delta_chain_partial_failure_collected(songs):
     """部分成功语义（2026-09-28）：单目标失败不上抛拖死整链——失败目标
     收集进返回值（异常自带归属标签），他站照常收到上传。"""

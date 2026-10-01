@@ -27,9 +27,7 @@ from maimai_py.exceptions import (
 )
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
-from maimai_py.providers.lxns import is_jwt
 from nonebot_plugin_alconna.uniseg import UniMessage
-from nonebot_plugin_awmc_helper.core.ext import jwt_payload_unverified
 from nonebot_plugin_awmc_helper.constants import DEFAULT_THEME
 from nonebot_plugin_awmc_helper.core.help import (
     Guide,
@@ -64,7 +62,13 @@ from nonebot_plugin_awmc_helper.core.binding import (
     resolve_query_binding,
 )
 from nonebot_plugin_awmc_helper.core.forward import try_send_forward
-from nonebot_plugin_awmc_helper.core.render.score import DrawScore, score_list_height
+from nonebot_plugin_awmc_helper.core.ext.lxns import token_writable
+from nonebot_plugin_awmc_helper.core.render.score import (
+    SCORE_LIST_HEAD_HEIGHT,
+    DrawScore,
+    score_list_page,
+    score_list_height,
+)
 from nonebot_plugin_awmc_helper.core.render.tools import text_to_image, image_to_bytes
 from nonebot_plugin_awmc_helper.core.render.best50 import best50_bytes
 
@@ -92,7 +96,6 @@ pc50_cmd = on_command("pc50", aliases={"PC50"}, block=True)
 靠 refresh_token 自动续期，续期签发的 scope 随应用当前权限）。
 """
 
-_LXNS_WRITE_SCOPE = "write_player"
 _LXNS_REBIND_HINT = (
     "检测到你的落雪授权不含成绩写入权限，本次未导出落雪；"
     "请重新「绑定落雪」完成授权后即可导分"
@@ -100,17 +103,13 @@ _LXNS_REBIND_HINT = (
 
 
 def _lxns_writable(token: str) -> bool:
-    """落雪凭据是否可写成绩。
+    """落雪凭据是否可写成绩（scope 知识单源主插件 ``core.ext.lxns.token_writable``）。
 
-    个人 API 密钥（非 JWT）恒可写；JWT 解码 payload 的 scope 判断是否含
-    ``write_player``；解码失败按可写处理（交由运行时 401 文案兜底）。
+    个人 API 密钥（非 JWT）与解码失败均按可写处理（交由运行时 401 文案
+    兜底）；JWT payload 的 scope 不含 write_player 不可写。
     """
-    if not is_jwt.match(token):
-        return True
-    claims = jwt_payload_unverified(token)
-    if claims is None:
-        return True
-    return _LXNS_WRITE_SCOPE in str(claims.get("scope", ""))
+    writable = token_writable(token)
+    return True if writable is None else writable
 
 
 def _build_targets(
@@ -170,8 +169,6 @@ async def _finish_if_jp_view(binding) -> None:
     musicDetail 全量抓取（每曲一跳、数百请求）风控代价过高，不立项
     （调研留档 dxrating-net-notes §6）。入口即拦，不给 pc/微信前置提示误导。
     """
-    from nonebot_plugin_awmc_helper.core.score import score_service
-
     if score_service.view_of(binding.service) == "jp":
         await UniMessage.text(
             " 游玩次数排行仅支持国服数据源（次数采集自国服机台导分），"
@@ -627,10 +624,9 @@ async def _(
             " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
         ).send(at_sender=True)
 
-    end_page = max(1, -(-len(matched) // 80))
-    real = min(max(page, 1), end_page)
+    end_page, real = score_list_page(len(matched), page)
     card = DrawScore(
-        280 + score_list_height(len(matched), real, end_page),
+        SCORE_LIST_HEAD_HEIGHT + score_list_height(len(matched), real, end_page),
         service=service_display(binding),
     )
     png = card.draw_score_list(
