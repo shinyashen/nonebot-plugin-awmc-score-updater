@@ -258,6 +258,63 @@ async def test_delta_chain_utage_score_passes(songs):
     assert [s.id for s in target.updates[0]] == [121634]
 
 
+async def test_delta_chain_utage_foldback_dropped_on_invalid_json_retry(songs):
+    """宴谱 × 降级过滤（2026-10-04 行为修复）：宴谱 6 位机台 id %10000 折回
+    宿主曲根 id，宿主在目标基线（普遍）时降级轮剔不掉水鱼未收录的宴谱 →
+    重传再 500 整批失败且文案误报「服务不可用」。降级过滤现对宴谱显式剔除：
+    宿主曲提升重传成功，宴谱计入 skipped（静默跳过口径）。
+
+    锚 100199 = [蛸]チルノのパーフェクトさんすう教室（真实宴谱，样例曲库
+    同款）；基线含宿主曲 199 → 折回 199 命中收录集，修复前漏剔再 500。
+    """
+    from maimai_py.exceptions import InvalidJsonError
+
+    from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
+
+    client = await _make_client()
+
+    class UtageRejectingProvider(FakeUpdateProvider):
+        """模拟水鱼服务端：载荷含未收录 id（含未收录宴谱）即整批 500。"""
+
+        def __init__(self, scores=None, known_ids=frozenset()):
+            super().__init__(scores)
+            self.known_ids = frozenset(known_ids)
+            self.update_calls = 0
+
+        async def update_scores(self, identifier, scores, client):
+            self.update_calls += 1
+            if any(s.id not in self.known_ids for s in scores):
+                raise InvalidJsonError("<html>500</html>")
+            self.updates.append(list(scores))
+            self.scores.extend(scores)
+
+    source = FakeUpdateProvider(
+        [
+            # 宿主曲 199 的提升（水鱼收录）
+            mk_score(song_id=199, achievements=100.0, dx_score=2500),
+            # 宴谱 100199（水鱼库无此宴体）
+            mk_score(
+                song_id=100199,
+                song_type=SongType.UTAGE,
+                level_index=LevelIndex.BASIC,
+            ),
+        ]
+    )
+    water = UtageRejectingProvider(
+        [mk_score(achievements=99.0, dx_score=2000)],
+        known_ids={199},
+    )
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [(water, PlayerIdentifier(credentials="w"), {"name": "水鱼"})]
+
+    skipped, _, _, failures = await delta_updates_chain(client, src, targets)
+
+    assert skipped == 1  # 宴谱降级剔除计入 skipped（静默跳过口径）
+    assert failures == []
+    assert water.update_calls == 2  # 首轮 500 + 降级重传
+    assert [s.id for s in water.updates[0]] == [199]  # 重传只带宿主曲提升
+
+
 async def test_delta_chain_source_failure_propagates(songs):
     from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
 

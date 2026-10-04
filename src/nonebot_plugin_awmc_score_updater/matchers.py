@@ -80,8 +80,9 @@ from .updater import FAIL_TARGET_ATTR, SaltArcadeProvider, run_update
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
 help_cmd = on_command("导帮助", aliases={"传分帮助", "上传分数帮助"}, block=True)
 bindwx_cmd = on_command("绑定微信", aliases={"bindwx", "微信绑定"}, block=True)
-# 分数前缀与主插件分数列表同口径（DS_RE 同款）：整数=标级（13、13+），
-# 小数=定数（13.0）；13pc列表 即标级 13 全部谱面（定数 13.0-13.5）的 pc 排行
+# 分数前缀与主插件分数列表同口径（core.combo numeric_level 裸数字解析，
+# parse_combo）：整数=标级（13、13+），小数=定数（13.0）；13pc列表 即
+# 标级 13 全部谱面（定数 13.0-13.5）的 pc 排行
 pc_list_cmd = on_regex(
     at_tolerant(r"^([0-9]+(?:\.[0-9]+)?\+?)\s?pc列表\s?([0-9]+)?$"),
     block=True,
@@ -95,6 +96,27 @@ pc50_cmd = on_command("pc50", aliases={"PC50"}, block=True)
 需解码 payload 的 scope 声明确认（access_token 仅 15 分钟有效，主插件
 靠 refresh_token 自动续期，续期签发的 scope 随应用当前权限）。
 """
+
+# 上传目标显示名：目标装配与失败归属判定的比较单源（比较点一律引常量）；
+# 文案句子内嵌的「水鱼/落雪」字样是完整句子而非目标名比较，不引此常量
+_TARGET_DF = "水鱼"
+_TARGET_LX = "落雪"
+
+# pc 指令（pc列表/pc50）共用文案：前置检查收敛于 _resolve_pc_context，
+# 收尾兜底（pc50 全零行）与校准提示小助手亦引用
+_PC_NO_WECHAT_HINT = "尚未绑定微信二维码，暂无游玩次数数据"
+_PC_NO_DATA_HINT = "暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
+_PC_UNCALIBRATED_HINT = (
+    " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
+)
+
+# 落雪续期退避阶梯（秒，Q43 新令牌生效延迟）：5s/10s 两级，末档触发慢查询提示
+_LXNS_RETRY_LADDER = (5, 10)
+
+# 定数匹配容差（13.0pc列表 挑谱）：与主插件 combo 定数过滤（core.combo
+# _ds_cond 的 round 一位小数口径）在 x.x5 边界行为不同（本处 abs 差 < 容差），
+# 各自产品语义，改一侧须核对另一侧
+_DS_MATCH_TOL = 0.05
 
 _LXNS_REBIND_HINT = (
     "检测到你的落雪授权不含成绩写入权限，本次未导出落雪；"
@@ -144,7 +166,7 @@ def _build_targets(
             (
                 divingfish_provider,
                 PlayerIdentifier(credentials=df_credentials),
-                {"name": "水鱼"},
+                {"name": _TARGET_DF},
             )
         )
     lx_note: str | None = None
@@ -154,7 +176,7 @@ def _build_targets(
                 (
                     lxns_provider,
                     PlayerIdentifier(credentials=binding.lxns_token),
-                    {"name": "落雪"},
+                    {"name": _TARGET_LX},
                 )
             )
         else:
@@ -174,6 +196,39 @@ async def _finish_if_jp_view(binding) -> None:
             " 游玩次数排行仅支持国服数据源（次数采集自国服机台导分），"
             "日服 NET 暂不支持该指令"
         ).finish(at_sender=True)
+
+
+async def _resolve_pc_context(session: Session, event: Event | None):
+    """pc 指令（pc列表/pc50）共用前置：绑定解析 → 日服视图拦截 → 微信绑定
+    与 pc 数据检查，返回 (binding, who, wb, pc_map) 供两 handler 继续。
+
+    @ 代查（2026-09-30）：绑定/微信/pc 数据全部取查询目标（at 只读解析）；
+    微信绑定与 pc 数据的前置检查先于全量成绩拉取（未绑微信/从未导分的用户
+    不必白等数据站的慢查询）。前置不满足直接 .finish() 终止
+    （FinishedException 上穿本函数），不存在不可达的返回路径。
+    """
+    platform, user_id = session_keys(session)
+    binding, at_target = await resolve_query_binding(session, event)
+    await _finish_if_jp_view(binding)
+    target_id = at_target or user_id
+    who = "对方" if at_target else ""
+    wb = await wechat_store.get(platform, target_id)
+    if wb is None or not wb.arcade_user_id:
+        await UniMessage.text(f" {who}{_PC_NO_WECHAT_HINT}").finish(at_sender=True)
+    pc_map = {
+        row_key(r): r.play_count
+        for r in await play_count_store.counts(wb.arcade_user_id)
+    }
+    if not pc_map:
+        await UniMessage.text(f" {who}{_PC_NO_DATA_HINT}").finish(at_sender=True)
+    return binding, who, wb, pc_map
+
+
+async def _hint_if_uncalibrated(wb, *, page: int = 1) -> None:
+    """从未扫码校准（last_full_at 空）时提示次数为导分增量估算；分页列表仅
+    首页提示（pc50 无分页概念，恒满足）。仅 send 不 finish，不影响出图。"""
+    if page == 1 and await play_count_store.last_full_at(wb.arcade_user_id) is None:
+        await UniMessage.text(_PC_UNCALIBRATED_HINT).send(at_sender=True)
 
 
 async def _resolve_qrcode(text: str) -> tuple[str, str]:
@@ -203,11 +258,11 @@ def _failure_hint(name: str, exc: Exception) -> str:
     if isinstance(exc, ImportFailed):
         return str(exc)  # 续期阶梯产物（重绑/暂时未能同步），文案已完整
     if isinstance(exc, PlayerNotAuthorizedError):
-        if name == "水鱼":
+        if name == _TARGET_DF:
             return "水鱼已要求成绩写入走 OAuth 授权，请发送「绑定水鱼」完成一次授权"
         return f"{name}未授权成绩写入，请重新「绑定{name}」"
     if isinstance(exc, InvalidPlayerIdentifierError):
-        if name == "水鱼":
+        if name == _TARGET_DF:
             return "水鱼 Import-Token 已失效，请到主插件重新绑定"
         return f"{name}凭据已失效，请重新「绑定{name}」"
     if isinstance(exc, InvalidDeveloperTokenError):
@@ -240,7 +295,8 @@ async def _run_with_refresh(
     refresh_token 续期落库后重试（不限主插件 service 语义）。返回 (用时秒,
     跳过条数, 落雪只读提示, 目标名列表, 部分失败目标列表)。
 
-    落雪续期两条入口汇入同一阶梯（5s/10s 退避，Q43 新令牌生效延迟）：
+    落雪续期两条入口汇入同一阶梯（_LXNS_RETRY_LADDER 退避，Q43 新令牌生效
+    延迟）：
     - 整链失败（run_update 上抛：全部目标失败/源失败）且归属落雪——续期后
       重试，耗尽抛 ImportFailed「暂时未能同步」（handler 映射为整链文案）；
     - 部分失败（他站成功、落雪 401 进失败列表）——同样续期重试，耗尽后
@@ -280,7 +336,7 @@ async def _run_with_refresh(
             (
                 exc
                 for name, exc in failures
-                if name == "落雪" and isinstance(exc, InvalidPlayerIdentifierError)
+                if name == _TARGET_LX and isinstance(exc, InvalidPlayerIdentifierError)
             ),
             None,
         )
@@ -300,9 +356,9 @@ async def _run_with_refresh(
         # 两者均非落雪则立即上抛，不白等续期退避（handler 的 token 无效
         # 文案本就对）。
         fail_name = getattr(exc, FAIL_TARGET_ATTR, None)
-        if fail_name is not None and fail_name != "落雪":
+        if fail_name is not None and fail_name != _TARGET_LX:
             raise
-        if "落雪" not in [kw["name"] for _, _, kw in _build_targets(binding)[0]]:
+        if _TARGET_LX not in [kw["name"] for _, _, kw in _build_targets(binding)[0]]:
             raise
         status = await binding_service.refresh_lxns(binding)
         if status == "dead":
@@ -317,16 +373,16 @@ async def _run_with_refresh(
         status = await binding_service.refresh_lxns(binding)
         if status == "dead":
             return replace_failure(
-                result, "落雪", ImportFailed("落雪授权已过期，请重新绑定落雪")
+                result, _TARGET_LX, ImportFailed("落雪授权已过期，请重新绑定落雪")
             )
         if status != "refreshed":
             return result
-    # 落雪续期阶梯（refreshed 已确认）：新令牌生效有短延迟，5s/10s 两级
-    # 退避重试；进入 10s 档时触发慢查询提示（整链/部分失败两态共用）
+    # 落雪续期阶梯（refreshed 已确认，:data:`_LXNS_RETRY_LADDER`）：进入末档
+    # 时触发慢查询提示（整链/部分失败两态共用）
     last: InvalidPlayerIdentifierError | None = None
     notified = False
-    for delay in (5, 10):
-        if delay >= 10 and notify_slow is not None and not notified:
+    for delay in _LXNS_RETRY_LADDER:
+        if delay >= _LXNS_RETRY_LADDER[-1] and notify_slow is not None and not notified:
             notified = True
             try:
                 await notify_slow()
@@ -346,7 +402,7 @@ async def _run_with_refresh(
     # （阶梯内仍全失败上抛）保持 ImportFailed 上抛由 handler 映射
     exhausted = ImportFailed("落雪数据暂时未能同步，请一分钟后再试")
     if result is not None:
-        return replace_failure(result, "落雪", exhausted)
+        return replace_failure(result, _TARGET_LX, exhausted)
     raise exhausted from last
 
 
@@ -573,56 +629,31 @@ async def _(
     标级匹配（13 / 13+）；宴谱按其定数（.0/.7）自然入列。成绩展示字段来自
     当前数据源，次数来自本插件 play_count 表——次数采集自国服机台导分，
     故日服（jp 视图）数据源整链不可用（:meth:`_finish_if_jp_view` 入口拦截）；
-    支持 @某人 代查（绑定/微信/pc 数据均取查询目标，2026-09-30）。
+    支持 @某人 代查（前置收敛于 :func:`_resolve_pc_context`）。
     """
     ds_raw, page_raw = groups
     page = parse_page(page_raw)
-    platform, user_id = session_keys(session)
 
-    # @ 代查（2026-09-30）：绑定/微信/pc 数据全部取查询目标（at 只读解析）
-    binding, at_target = await resolve_query_binding(session, event)
-    await _finish_if_jp_view(binding)
-    target_id = at_target or user_id
-    who = "对方" if at_target else ""
-
-    # 微信绑定与 pc 数据的前置检查先于全量成绩拉取（对齐 pc50 顺序）：
-    # 未绑微信/从未导分的用户不必白等数据站的慢查询
-    wb = await wechat_store.get(platform, target_id)
-    if wb is None or not wb.arcade_user_id:
-        await UniMessage.text(f" {who}尚未绑定微信二维码，暂无游玩次数数据").finish(
-            at_sender=True
-        )
-    pc_map = {
-        row_key(r): r.play_count
-        for r in await play_count_store.counts(wb.arcade_user_id)
-    }
-    if not pc_map:
-        await UniMessage.text(
-            f" {who}暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
-        ).finish(at_sender=True)
-
+    binding, _, wb, pc_map = await _resolve_pc_context(session, event)
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
 
     # 分数前缀同主插件分数列表口径：带小数点=定数，否则=标级；
     # 宴谱按其定数（.0/.7）自然入列
     if "." in ds_raw:
         ds = float(ds_raw)
-        matched = [s for s in scores.scores if abs(s.level_value - ds) < 0.05]
+        matched = [s for s in scores.scores if abs(s.level_value - ds) < _DS_MATCH_TOL]
     else:
         matched = [s for s in scores.scores if s.level == ds_raw]
     matched = [s for s in matched if pc_key(s) in pc_map]
     if not matched:
-        await UniMessage.text("  没有找到符合条件的成绩").finish(at_sender=True)
+        await UniMessage.text(" 没有找到符合条件的成绩").finish(at_sender=True)
 
     def pc_of(s) -> int:
         return pc_map[pc_key(s)]
 
     matched.sort(key=lambda s: (-pc_of(s), -(s.achievements or 0)))
 
-    if page == 1 and await play_count_store.last_full_at(wb.arcade_user_id) is None:
-        await UniMessage.text(
-            " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
-        ).send(at_sender=True)
+    await _hint_if_uncalibrated(wb, page=page)
 
     end_page, real = score_list_page(len(matched), page)
     card = DrawScore(
@@ -654,44 +685,20 @@ async def _(
     三数字沿用模板占位口径（所列成绩 RA 之和，与 ap50 一致）。次数采集自
     国服机台导分，故日服（jp 视图）数据源整链不可用
     （:meth:`_finish_if_jp_view` 入口拦截），且需先「导」过；
-    支持 @某人 代查（绑定/微信/pc 数据均取查询目标，2026-09-30）。
+    支持 @某人 代查（前置收敛于 :func:`_resolve_pc_context`）。
     """
-    platform, user_id = session_keys(session)
-
-    # @ 代查（2026-09-30）：绑定/微信/pc 数据全部取查询目标（at 只读解析）
-    binding, at_target = await resolve_query_binding(session, event)
-    await _finish_if_jp_view(binding)
-    target_id = at_target or user_id
-    who = "对方" if at_target else ""
-    wb = await wechat_store.get(platform, target_id)
-    if wb is None or not wb.arcade_user_id:
-        await UniMessage.text(f" {who}尚未绑定微信二维码，暂无游玩次数数据").finish(
-            at_sender=True
-        )
-    pc_map = {
-        row_key(r): r.play_count
-        for r in await play_count_store.counts(wb.arcade_user_id)
-    }
-    if not pc_map:
-        await UniMessage.text(
-            f" {who}暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
-        ).finish(at_sender=True)
+    binding, who, wb, pc_map = await _resolve_pc_context(session, event)
 
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
     rows = [s for s in scores.scores if pc_map.get(pc_key(s), 0) > 0]
     if not rows:
-        await UniMessage.text(
-            f" {who}暂无游玩次数数据，请先「导」一次；带二维码私聊导分可校准全部次数"
-        ).finish(at_sender=True)
+        await UniMessage.text(f" {who}{_PC_NO_DATA_HINT}").finish(at_sender=True)
     bests = build_bests(
         rows,
         key=lambda s: (pc_map[pc_key(s)], s.achievements or 0),
     )
 
-    if await play_count_store.last_full_at(wb.arcade_user_id) is None:
-        await UniMessage.text(
-            " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
-        ).send(at_sender=True)
+    await _hint_if_uncalibrated(wb)
 
     player = await score_service.get_player(binding, notify_slow=slow_notice())
     png = await best50_bytes(

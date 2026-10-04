@@ -18,6 +18,15 @@ from nonebot_plugin_awmc_helper.core.http import create_smart_client
 
 _client: httpx.AsyncClient | None = None
 
+# SaltNet 直连超时（连接/读/写/池，秒）：成绩明细载荷大，读放宽到 60s
+_TIMEOUT = httpx.Timeout(connect=10, read=60, write=10, pool=10)
+
+# 二维码协议常数（原版 Hoshino 插件同款）：机台识别原文为 SGWCMAID 前缀
+# 84 位、有效内容取尾 64 位；页面链接形态截取 MAID 段后至多 76 字符再取尾 64
+_QR_RAW_LEN = 84
+_QR_CORE_LEN = 64
+_QR_MAID_WINDOW = 76
+
 
 def _lenient_verify() -> ssl.SSLContext:
     """SaltNet 证书现状（2026-09 实测）：主备域名证书均主机名不匹配（签给
@@ -33,10 +42,7 @@ def get_client() -> httpx.AsyncClient:
     """SaltNet 直连共享客户端（懒创建，代理传输与主插件 ext 层同源）。"""
     global _client
     if _client is None:
-        _client = create_smart_client(
-            timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
-            verify=_lenient_verify(),
-        )
+        _client = create_smart_client(timeout=_TIMEOUT, verify=_lenient_verify())
     return _client
 
 
@@ -51,11 +57,11 @@ def extract_qrcode(text: str) -> str | None:
     或二维码页面的 https 链接（截取 ``MAID`` 段的尾 64 位）。
     """
     text = text.strip()
-    if text.startswith("SGWCMAID") and len(text) == 84:
-        return text[-64:]
+    if text.startswith("SGWCMAID") and len(text) == _QR_RAW_LEN:
+        return text[-_QR_CORE_LEN:]
     if text.startswith("http"):
-        if matches := re.findall(r"MAID.{0,76}", text):
-            return matches[0][-64:]
+        if matches := re.findall(rf"MAID.{{0,{_QR_MAID_WINDOW}}}", text):
+            return matches[0][-_QR_CORE_LEN:]
     return None
 
 

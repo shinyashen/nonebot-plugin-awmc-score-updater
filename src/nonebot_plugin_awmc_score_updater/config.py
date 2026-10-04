@@ -11,7 +11,7 @@ class Config(BaseModel):
     # SaltNet API 主/备域名（Realtvop 代理服务：解析机台二维码 + 拉取微信成绩）
     awmc_su_salt_api_url: str = "https://salt_api_main.realtvop.top"
     awmc_su_salt_api_fallback_url: str = "https://salt_api_backup.realtvop.top"
-    # 传分失败最大重试次数（指数退避 0.5s 起）
+    # 传分失败最大重试次数（指数退避 0.5s 起，基数 = updater._RETRY_BACKOFF_BASE）
     awmc_su_max_retries: int = 3
 
 

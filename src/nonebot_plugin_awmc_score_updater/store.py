@@ -186,6 +186,11 @@ class PlayCountSync(SQLModel, table=True):
     last_full_at: NaiveDatetime | None = None  # 最近全量（扫码）导分时间；NULL=从未校准
 
 
+# 全量导分截断守卫：现有 PC 行数超过载荷的该倍数视为 SaltNet 分页事故
+# （防清库，见 PlayCountStore.observe docstring）
+_FULL_LOAD_TRUNCATE_FACTOR = 2
+
+
 class PlayCountStore:
     """游玩次数读写：导分链观测落地（observe）与 pc 列表查询（counts）。"""
 
@@ -214,12 +219,18 @@ class PlayCountStore:
 
         - ``anchored=True``（扫码全量）：权威累计值整表替换并记
           ``last_full_at``；载荷中 playCount 缺失（null）的谱面保留旧值。
-          现有行数超过载荷两倍视为异常截断（SaltNet 分页事故），放弃替换防清库。
+          现有行数超过载荷两倍（_FULL_LOAD_TRUNCATE_FACTOR 倍判定）视为
+          异常截断（SaltNet 分页事故），放弃替换防清库。
         - ``anchored=False``（简略）：桥接增量——基线取各数据站已有成绩的
           并集（先到先得）；基线有该谱且 (达成率, DX 分) 任一变化 → +1
           （首见行直接以 1 落地）；基线无该谱（数据站全缺，如站侧删除曲）
           只播 0 值种子行，防「每次导分都算一次」的虚增。
         - 空载荷直接跳过（拉取失败的占位回调不落库）。
+
+        并发边界（不加锁）：本函数按 arcade_user_id 无互斥，跨平台绑定同一
+        华立账号并发导分理论上可撞主键（IntegrityError），该异常由 run_update
+        的 pc_hook 兜底吞为 warning（不虚增次数）；同平台同用户并发已被
+        matchers 的 _import_locks 互斥。
         """
         if not source_scores:
             return
@@ -232,7 +243,9 @@ class PlayCountStore:
             }
 
             if anchored:
-                if existing and len(source_scores) * 2 < len(existing):
+                if existing and len(source_scores) * _FULL_LOAD_TRUNCATE_FACTOR < len(
+                    existing
+                ):
                     logger.warning(
                         f"华立账号 {arcade_user_id} 全量导分载荷 "
                         f"{len(source_scores)} 条远小于既有 PC 行数 "

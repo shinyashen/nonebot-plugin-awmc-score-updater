@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable, Awaitable
 
 from maimai_py import LXNSProvider, MaimaiClient
 from nonebot.log import logger
-from maimai_py.enums import FCType, FSType, RateType
+from maimai_py.enums import FCType, FSType, RateType, SongType
 from maimai_py.models import Score, PlayerIdentifier
 from maimai_py.exceptions import InvalidJsonError
 from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
@@ -50,6 +50,10 @@ maimai_py 异常（InvalidPlayerIdentifierError 等）无 provider 标识，水�
 包装类型、保持 maimai_py 异常族原样上抛），matchers 的落雪续期归属判定据此
 区分是哪一数据站失效。
 """
+
+_RETRY_BACKOFF_BASE = 0.5
+"""指数退避基数（秒）：第 n 次重试等待 基数 × 2^n，config 的
+``awmc_su_max_retries`` 注释与此互引。"""
 
 
 def _tag_fail_target(exc: BaseException, name: str) -> None:
@@ -366,6 +370,8 @@ async def delta_updates_chain(
     # 水鱼未收录新曲的成绩会让 update_records 服务端 500（2026-09-26 线上实测：
     # 空载荷 200、含未收录曲目 id 的载荷 500）。过滤基准 = 目标已有成绩出现过的
     # 曲目 id（目标确认收录）；500 后自动降级为仅传已收录部分并报告跳过数。
+    # 注意该集对宴谱不可作剔除依据：宴谱 6 位机台 id %10000 折回宿主曲根 id，
+    # 宿主在基线（普遍）时会漏剔水鱼未收录的宴谱——降级过滤对宴谱另显式剔除。
     # 全量模式不拉取目标、降级不可用：InvalidJsonError 按目标进 failures
     # （部分成功语义），单目标全败才整链上抛（与原 updates_chain 一致）。
     known_song_ids = {score.id % 10000 for d in target_dicts for score in d.values()}
@@ -402,6 +408,10 @@ async def delta_updates_chain(
             allowed = kwargs.get("allowed_ids")
             if allowed is not None:
                 batch_t = [s for s in batch if s.id in allowed]
+                if not batch_t:
+                    # 该站曲库过滤后空批次：本站无可传内容，不再空跑
+                    # client.updates（空载荷上传纯浪费请求/配额）
+                    continue
             if target_mode == "parallel" or (
                 target_mode == "fallback" and not upload_tasks
             ):
@@ -425,7 +435,14 @@ async def delta_updates_chain(
     # 全量模式（compare_target=False）无 known_song_ids（不拉目标）：过滤集
     # 恒空、重传不可用——InvalidJsonError 全走 failures，不得虚报 skipped
     if compare_target and any(isinstance(r, InvalidJsonError) for r in results):
-        filtered = [s for s in delta_scores if s.id % 10000 in known_song_ids]
+        # 宴谱显式剔除：宴谱 6 位机台 id %10000 折回宿主曲根 id，宿主在基线
+        # （普遍）时上式判定不出未收录 → 重传再 500 整批失败且文案误导
+        # （2026-10-04 行为修复）；被剔除的宴谱计入 skipped（静默跳过口径）
+        filtered = [
+            s
+            for s in delta_scores
+            if s.type != SongType.UTAGE and s.id % 10000 in known_song_ids
+        ]
         skipped_unknown = len(delta_scores) - len(filtered)
         if filtered and skipped_unknown:
             # 仅对返回 InvalidJsonError 的目标降级重传已收录部分：已成功站
@@ -556,7 +573,7 @@ async def run_update(
             last_exc = e
             if attempt >= max_retries:
                 raise
-            delay = 0.5 * (2**attempt)
+            delay = _RETRY_BACKOFF_BASE * (2**attempt)
             logger.warning(
                 f"传分第 {attempt + 1}/{max_retries} 次重试（等待 {delay}s）：{e!r}"
             )
