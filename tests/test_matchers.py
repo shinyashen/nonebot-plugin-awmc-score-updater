@@ -27,11 +27,11 @@ async def stores(tmp_path):
 
     awmc_store.set_db_file(tmp_path / "awmc.db")
     await awmc_store.init_db()
-    su_store.set_db_file(tmp_path / "su.db")
+    await su_store.set_db_file(tmp_path / "su.db")
     await su_store.init_store()
     yield
     awmc_store.set_db_file(conftest._session_db["awmc"])
-    su_store.set_db_file(conftest._session_db["su"])
+    await su_store.set_db_file(conftest._session_db["su"])
 
 
 async def _bind_token(df: str | None = None, lx: str | None = None) -> None:
@@ -1326,6 +1326,7 @@ async def test_run_with_refresh_partial_lxns_dead_rebind_hint(monkeypatch):
 
 _EXT_TITLES = {
     8: "True Love Song",
+    131: "Link",
     199: "チルノのパーフェクトさんすう教室",
     624: "KISS CANDY FLAVOR",
 }
@@ -1569,6 +1570,112 @@ async def test_pc50_command_renders_bests(app: App, stores, monkeypatch):
     assert sub_of(captured["b35"][0]) == "pc: 9"  # 曲 8
     assert sub_of(captured["b35"][1]) == "pc: 3"  # 曲 199 SD 谱面自身 pc
     assert sub_of(captured["b35"][2]) == "pc: 1"  # 曲 624
+
+
+async def test_pc_list_ds_boundary_single_source(app: App, stores, monkeypatch):
+    """pc列表 定数过滤单源主插件 ``calc.level_value_match``（十分位 round，
+    与主插件 combo 定数条件同源）的边界锚定：查询 13.5 → 精确 13.5、同十分位
+    近邻 13.49（round 134.9=135）、浮点尾差 13.5-1e-15（S-9 动机）命中；
+    半界 13.45（round 134.5=134）与 13.55（round 135.5=136，银行家舍入均舍
+    离 135）不命中——与主插件 test_core_calc 边界断言同口径。
+
+    行为边界备忘：旧 abs<0.05 口径对 13.45/13.55 的浮点差同为
+    0.05000000000000071，本就**不**匹配，故一位小数查询（13.5）下换源前后
+    判定完全一致（穷举验证 13.00–14.00 两位小数成绩无差异对）；真实差异只在
+    查询值本身为 x.x5（如 13.45pc列表，旧开区间窗口按银行家舍入收敛为闭区
+    间）与半界恰舍向偶数十值的成对（如 13.35 对 13.4 查询由不命中变命中）。
+    本用例锚定换单源后的现行行为，防实现漂移。13.45/13.49/13.55 非真实曲目
+    定数（曲库定数均一位小数），按「（构造）」口径补位；13.5 用真实曲
+    131 Link SD MASTER（maimai PLUS v11000，快照真实 ds）。
+    """
+    from types import SimpleNamespace
+    from base64 import b64encode as b64
+
+    import nonebot
+    from fake import fake_private_message_event_v11
+    from maimai_py import SongType
+    from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+    from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+    from nonebot_plugin_awmc_score_updater import matchers
+    from nonebot_plugin_awmc_score_updater.store import play_count_store
+
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+
+    rows = [
+        # （构造）同十分位近邻：round(134.9)=135 → 命中
+        _mk_ext(9001, level_value=13.49, ra=150),
+        # 真实曲 13.5 精确命中（快照真实 ds/等级/版本码）
+        _mk_ext(
+            131,
+            typ=SongType.STANDARD,
+            level_value=13.5,
+            version=11000,
+            ra=120,
+        ),
+        # （构造）浮点尾差：round 抹平表示误差 → 命中
+        _mk_ext(9004, level_value=13.5 - 1e-15, ra=110),
+        # （构造）下半界：round(134.5)=134 ≠ 135 → 不命中
+        _mk_ext(9002, level_value=13.45, ra=100),
+        # （构造）上半界：round(135.5)=136 ≠ 135 → 不命中
+        _mk_ext(9003, level_value=13.55, ra=100),
+    ]
+
+    async def fake_get_scores_all(binding, notify_slow=None):
+        return SimpleNamespace(scores=rows)
+
+    monkeypatch.setattr(
+        matchers,
+        "score_service",
+        SimpleNamespace(get_scores_all=fake_get_scores_all, view_of=lambda _s: "cn"),
+    )
+
+    captured: dict = {}
+
+    class _FakeCard:
+        """DrawScore 替身：只捕获 draw_score_list 收到的匹配行（不出图）。"""
+
+        def __init__(self, _height, *, service=None):
+            pass
+
+        def draw_score_list(self, ds_raw, matched, real, end_page, *, sub_of=None):
+            captured.update(ds_raw=ds_raw, matched=matched)
+            return b"png"
+
+    monkeypatch.setattr(matchers, "DrawScore", _FakeCard)
+
+    # pc 行全量锚定（anchored 置位 last_full_at，不发校准提示）：全部成绩
+    # 都有 pc 行，过滤只考察定数维度
+    await play_count_store.observe(
+        "888",
+        [
+            _mk_pc(9001, 5),
+            _mk_pc(131, 2, typ=SongType.STANDARD),
+            _mk_pc(9004, 3),
+            _mk_pc(9002, 7),
+            _mk_pc(9003, 1),
+        ],
+        [],
+        anchored=True,
+    )
+
+    event = fake_private_message_event_v11(
+        message="13.5pc列表", user_id=12345678, to_me=True
+    )
+    async with app.test_matcher(matchers.pc_list_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.image(f"base64://{b64(b'png').decode()}")]),
+            result=None,
+            bot=bot,
+        )
+
+    assert captured["ds_raw"] == "13.5"
+    # pc 降序（5>3>2）：命中 13.49 / 13.5（含尾差），半界两值被排除
+    assert [s.id for s in captured["matched"]] == [9001, 9004, 131]
 
 
 @pytest.mark.asyncio

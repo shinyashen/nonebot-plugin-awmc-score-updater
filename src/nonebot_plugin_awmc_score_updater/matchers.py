@@ -29,6 +29,7 @@ from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from nonebot_plugin_alconna.uniseg import UniMessage
 from nonebot_plugin_awmc_helper.constants import DEFAULT_THEME
+from nonebot_plugin_awmc_helper.core.calc import level_value_match
 from nonebot_plugin_awmc_helper.core.help import (
     Guide,
     GuidePage,
@@ -112,11 +113,6 @@ _PC_UNCALIBRATED_HINT = (
 
 # 落雪续期退避阶梯（秒，Q43 新令牌生效延迟）：5s/10s 两级，末档触发慢查询提示
 _LXNS_RETRY_LADDER = (5, 10)
-
-# 定数匹配容差（13.0pc列表 挑谱）：与主插件 combo 定数过滤（core.combo
-# _ds_cond 的 round 一位小数口径）在 x.x5 边界行为不同（本处 abs 差 < 容差），
-# 各自产品语义，改一侧须核对另一侧
-_DS_MATCH_TOL = 0.05
 
 _LXNS_REBIND_HINT = (
     "检测到你的落雪授权不含成绩写入权限，本次未导出落雪；"
@@ -641,7 +637,8 @@ async def _(
     # 宴谱按其定数（.0/.7）自然入列
     if "." in ds_raw:
         ds = float(ds_raw)
-        matched = [s for s in scores.scores if abs(s.level_value - ds) < _DS_MATCH_TOL]
+        # 口径单源 calc.level_value_match（与主插件 combo 定数条件同源）
+        matched = [s for s in scores.scores if level_value_match(s.level_value, ds)]
     else:
         matched = [s for s in scores.scores if s.level == ds_raw]
     matched = [s for s in matched if pc_key(s) in pc_map]

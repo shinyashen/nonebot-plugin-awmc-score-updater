@@ -29,6 +29,7 @@ from maimai_py.enums import FCType, FSType, RateType, SongType
 from maimai_py.models import Score, PlayerIdentifier
 from maimai_py.exceptions import InvalidJsonError
 from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
+from nonebot_plugin_awmc_helper.core.cache import TtlCache
 
 from .store import pc_key
 from .saltapi import SaltApiError, deser_score, fetch_score_payload
@@ -236,16 +237,16 @@ async def _gather(
     return ok, failures
 
 
-_LXNS_IDS_CACHE: tuple[float, set[int]] | None = None
-"""落雪曲库 id 集缓存：(拉取时刻, id 集)。TTL 内复用，避免阶梯重试与连续
-导分重复拉列表（该拉取位于计时窗口内，重复拉取会虚增报给用户的用时）。"""
-_LXNS_IDS_TTL = 180.0
+_LXNS_IDS_CACHE = TtlCache(ttl=180.0)
+"""落雪曲库 id 集缓存（单键）：TTL 内复用，避免阶梯重试与连续导分重复拉
+列表（该拉取位于计时窗口内，重复拉取会虚增报给用户的用时）。缓存实现
+单源主插件 ``core.cache.TtlCache``。"""
+_LXNS_IDS_CACHE_KEY = "song_ids"
 
 
 def _lxns_ids_cache_clear() -> None:
     """清空曲库 id 缓存（测试用）。"""
-    global _LXNS_IDS_CACHE
-    _LXNS_IDS_CACHE = None
+    _LXNS_IDS_CACHE.clear()
 
 
 async def _lxns_known_song_ids() -> set[int] | None:
@@ -258,10 +259,10 @@ async def _lxns_known_song_ids() -> set[int] | None:
     作过滤基准，TTL 内复用缓存；任一异常返回 None = 本次不做预过滤
     （保持旧行为）。
     """
-    global _LXNS_IDS_CACHE
-    now = time.monotonic()
-    if _LXNS_IDS_CACHE is not None and now - _LXNS_IDS_CACHE[0] < _LXNS_IDS_TTL:
-        return _LXNS_IDS_CACHE[1]
+    # is not None 判定（set 可能为空但合法，TtlCache 勿存 None 的约定下
+    # get 的 None 即未命中/过期）
+    if (ids := _LXNS_IDS_CACHE.get(_LXNS_IDS_CACHE_KEY)) is not None:
+        return ids
     try:
         from nonebot_plugin_awmc_helper.core.ext.lxns import fetch_song_list
 
@@ -270,7 +271,7 @@ async def _lxns_known_song_ids() -> set[int] | None:
     except Exception as e:
         logger.warning(f"落雪曲库列表获取失败，本次导分不做落雪侧预过滤：{e!r}")
         return None
-    _LXNS_IDS_CACHE = (now, ids)
+    _LXNS_IDS_CACHE.set(_LXNS_IDS_CACHE_KEY, ids)
     return ids
 
 

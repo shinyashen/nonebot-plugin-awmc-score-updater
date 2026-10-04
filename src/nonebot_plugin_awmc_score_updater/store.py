@@ -15,7 +15,6 @@ score-updater wechat_binding/play_count 族），空表无行、无实际影响�
 跨仓不重名。
 """
 
-import sqlite3
 from pathlib import Path
 from datetime import datetime
 
@@ -23,11 +22,11 @@ from pydantic import NaiveDatetime
 from sqlmodel import Field, SQLModel, select
 from nonebot.log import logger
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.exc import OperationalError as SAOperationalError
 from maimai_py.models import Score
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 from nonebot_plugin_localstore import get_data_dir
 from sqlmodel.ext.asyncio.session import AsyncSession
+from nonebot_plugin_awmc_helper.core.store import init_plugin_db, create_plugin_engine
 
 _engine: AsyncEngine | None = None
 _db_file: Path | None = None
@@ -42,35 +41,38 @@ def db_file():
     )
 
 
-def set_db_file(path: Path | None) -> None:
-    """重定向库文件并重置引擎（测试隔离用，生产勿调）。"""
+async def set_db_file(path: Path | None) -> None:
+    """重定向库文件并重置引擎（测试隔离用，生产勿调）。
+
+    旧引擎先 dispose 归还连接池，否则池内连接被 GC 回收时触发
+    ResourceWarning（aiosqlite 连接未显式关闭）。
+    """
     global _db_file, _engine
+    if _engine is not None:
+        await _engine.dispose()
     _db_file = path
     _engine = None
 
 
 def get_engine() -> AsyncEngine:
-    """懒创建的异步引擎（与主插件 core.store 同款模式）。"""
+    """懒创建的异步引擎；引擎构造走主插件 ``create_plugin_engine`` 工厂
+    （重定向/dispose/懒创建仍归本仓，``set_db_file`` 的测试重定向机制为本仓自有）。"""
     global _engine
     if _engine is None:
-        _engine = create_async_engine(f"sqlite+aiosqlite:///{db_file()}")
+        path = db_file()
+        _engine = create_plugin_engine(path.parent, path.name)
     return _engine
 
 
 async def init_store() -> None:
-    """建表（create_all 起步；字段变更时在此追加简易迁移）。
+    """建表（幂等）：走主插件 ``init_plugin_db`` 工厂。
 
-    create_all 的存在性检查与 CREATE 之间存在竞态：多进程同时初始化同一个
-    库文件（如 pytest-xdist 共享 CWD 路径）时会收到 "table already exists"，
-    对 SQLite 而言即幂等成功，忽略之（对齐主插件 init_db，2026-09-28 CI
-    实测两 worker 并发首建同炸）。
+    metadata 传 SQLModel 全局 metadata（口径同主仓 ``init_db``）——任一仓
+    ``create_all`` 连带建出其他仓已加载模型的空表，语义见模块 docstring；
+    「already exists」按幂等成功忽略的竞态处理（2026-09-28 CI 实测两 worker
+    并发首建同炸）已收敛在工厂内。
     """
-    try:
-        async with get_engine().begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
-    except (SAOperationalError, sqlite3.OperationalError) as e:
-        if "already exists" not in str(e):
-            raise
+    await init_plugin_db(get_engine(), SQLModel.metadata)
 
 
 class WechatBinding(SQLModel, table=True):

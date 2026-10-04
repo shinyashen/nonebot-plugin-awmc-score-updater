@@ -14,10 +14,10 @@ async def pc_store(tmp_path):
 
     from nonebot_plugin_awmc_score_updater import store as su_store
 
-    su_store.set_db_file(tmp_path / "pc.db")
+    await su_store.set_db_file(tmp_path / "pc.db")
     await su_store.init_store()
     yield su_store.play_count_store
-    su_store.set_db_file(conftest._session_db["su"])
+    await su_store.set_db_file(conftest._session_db["su"])
 
 
 def mk(

@@ -51,7 +51,7 @@ async def after_nonebot_init(after_nonebot_init: None, tmp_path_factory, worker_
     base = tmp_path_factory.mktemp(f"awmc-db-{worker_id}")
     _session_db["su"] = base / "su.db"
     _session_db["awmc"] = base / "awmc.db"
-    su_store.set_db_file(_session_db["su"])
+    await su_store.set_db_file(_session_db["su"])
     awmc_store.set_db_file(_session_db["awmc"])
 
 
