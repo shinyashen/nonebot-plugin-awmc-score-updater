@@ -888,3 +888,97 @@ async def test_run_update_partial_failure_returns_failures(songs):
     assert [name for name, _ in failures] == ["水鱼"]
     assert len(hook_calls) == 1
     assert len(ok.updates) == 1
+
+
+async def test_baseline_partial_failure_skips_target(songs):
+    """基线段部分成功（2026-10-04）：单站基线拉取失败跳过该站并随部分失败
+    返回（不整链上抛、不重试），幸存站照常增量上传，失败站不写、pc 观测
+    只收到幸存基线（线上落雪凭据双死拖死健康水鱼的事故回归）。"""
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+
+    class UnauthorizedFetch(FakeUpdateProvider):
+        """落雪 401（凭据双死）同型：基线拉取即抛身份失效。"""
+
+        async def get_scores_all(self, identifier, client):
+            raise InvalidPlayerIdentifierError("unauthorized")
+
+    ok = FakeUpdateProvider([mk_score(achievements=99.0, dx_score=2000)])
+    dead = UnauthorizedFetch([mk_score(achievements=50.0)])
+    source = FakeUpdateProvider([mk_score(achievements=100.0, dx_score=2500)])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (ok, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (dead, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+    hook_calls: list = []
+
+    async def hook(source_scores, target_dicts):
+        hook_calls.append(target_dicts)
+
+    duration, skipped, failures = await run_update(
+        client, src, targets, full=False, max_retries=0, pc_hook=hook
+    )
+    assert duration >= 0
+    assert skipped == 0
+    assert len(failures) == 1
+    name, exc = failures[0]
+    assert name == "落雪"
+    assert isinstance(exc, InvalidPlayerIdentifierError)
+    # 幸存水鱼照常增量上传；失败落雪本次完全不写
+    assert len(ok.updates) == 1
+    assert ok.updates[0][0].achievements == 100.0
+    assert dead.updates == []
+    # pc 观测只收到幸存水鱼的基线
+    assert len(hook_calls) == 1
+    assert len(hook_calls[0]) == 1
+
+
+async def test_all_baselines_failed_raises_in_declaration_order(songs):
+    """全部目标基线失败 → 仍整链上抛（装配序第一个异常，归属标签随行），
+    走调用方既有整链错误映射路径（matchers 落雪续期归属不变）。"""
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+
+    from nonebot_plugin_awmc_score_updater.updater import (
+        FAIL_TARGET_ATTR,
+        run_update,
+    )
+
+    client = await _make_client()
+
+    class UnauthorizedFetch(FakeUpdateProvider):
+        async def get_scores_all(self, identifier, client):
+            raise InvalidPlayerIdentifierError("unauthorized")
+
+    dead_a = UnauthorizedFetch([])
+    dead_b = UnauthorizedFetch([])
+    source = FakeUpdateProvider([mk_score()])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (dead_a, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (dead_b, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+    with pytest.raises(InvalidPlayerIdentifierError) as ei:
+        await run_update(client, src, targets, full=False, max_retries=0)
+    assert getattr(ei.value, FAIL_TARGET_ATTR, None) == "水鱼"
+
+
+async def test_source_failure_still_raises_with_healthy_targets(songs):
+    """源失败恒整链失败（无「部分」可言）：即使全部目标健康也上抛，
+    不进部分失败列表。"""
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    ok = FakeUpdateProvider([])
+    source = FakeUpdateProvider(fail=True)
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [
+        (ok, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+        (ok, PlayerIdentifier(credentials="l"), {"name": "落雪"}),
+    ]
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        await run_update(client, src, targets, full=False, max_retries=0)
+    assert ok.updates == []

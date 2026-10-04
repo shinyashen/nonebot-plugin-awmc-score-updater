@@ -192,22 +192,26 @@ async def _gather(
     providers: list[tuple[Any, PlayerIdentifier | None, dict[str, Any]]],
     callback: ChainCallback | None,
     mode: str,
-) -> list[list[Score]]:
-    """并行拉取一组 source/target 的裸成绩，收集成功结果，失败走 callback。
+) -> tuple[list[list[Score]], list[tuple[str, Exception]]]:
+    """并行拉取一组 source/target 的裸成绩，失败收集而非抛出。
 
     直接调 ``provider.get_scores_all``，不经 ``client.scores``（后者内部
-    ``configure`` 扩展见模块 docstring）。单个提供器失败不会中断整批
-    （callback 通知后以空成绩占位），但整体 gather 遇到异常仍会向上传播
-    ——由 run_update 的重试循环兜底。
+    ``configure`` 扩展见模块 docstring）。返回 (成功成绩列表, 失败目标列表)：
+    失败以 (目标名, 异常) 收集（异常自带 FAIL_TARGET_ATTR 归属标签，与上传
+    段失败同构），上抛与否由调用方定语义——源失败恒整链失败（源没拉到没有
+    「部分」可言，调用点直接 raise），目标基线失败进部分失败列表（见
+    :func:`delta_updates_chain`）。
 
     ⚠️ ``mode`` 的 fallback 分支生产路径不可达（run_update 恒显式传
     parallel）；不传 source_mode 直调 ``delta_updates_chain`` 同样落到
     fallback——单源场景两模式行为一致，多源时 fallback 只排第一个。"""
+    names: list[str] = []
     tasks = []
     for sp, ident, kwargs in providers:
         if ident is None:
             continue
         if mode == "parallel" or (mode == "fallback" and len(tasks) == 0):
+            names.append(kwargs.get("name", ""))
             task = asyncio.create_task(
                 _fetch_tagged(kwargs.get("name", ""), sp, ident, client)
             )
@@ -220,8 +224,12 @@ async def _gather(
                     )
                 )
             tasks.append(task)
-    results = await asyncio.gather(*tasks)
-    return [r for r in results if isinstance(r, list)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    ok = [r for r in results if isinstance(r, list)]
+    failures = [
+        (names[i], r) for i, r in enumerate(results) if isinstance(r, Exception)
+    ]
+    return ok, failures
 
 
 _LXNS_IDS_CACHE: tuple[float, set[int]] | None = None
@@ -284,13 +292,16 @@ async def delta_updates_chain(
     过滤剔除数, 源成绩快照, 各数据站基线字典列表, 失败目标列表)。源成绩为
     机台真值（_compare 原地合并前的独立拷贝）、基线为上传前的数据站状态，
     二者供游玩次数观测（store.observe）比对；基线字典键为谱面元组键
-    （pc_key 同构），基线列表可能为空（全量模式 / 目标拉取全败，此时桥接
-    无基准）。
+    （pc_key 同构），基线列表可能为空（全量模式；增量模式基线全败已整链
+    上抛，不会以部分失败形态走到这里）。
 
-    部分成功语义（2026-09-28）：单目标上传失败不再上抛拖死整链——他站已
-    写入的成绩不能因某一站（典型：水鱼写权限缺失）失败而白费。失败目标以
-    (目标名, 异常) 收集返回，异常实例自带 FAIL_TARGET_ATTR 归属标签；**全部**
-    目标失败仍上抛第一个异常，保持调用方的整链错误映射路径。
+    部分成功语义（2026-09-28 上传段、2026-10-04 基线段）：单目标失败不再
+    上抛拖死整链——他站已写入/可写入的成绩不能因某一站（典型：水鱼写权限
+    缺失、落雪凭据过期）失败而白费。基线失败的目标**跳过上传**（无基线
+    无从比对增量，盲传可能写歪）；两段失败统一以 (目标名, 异常) 收集返回
+    （同一目标两段互斥），异常实例自带 FAIL_TARGET_ATTR 归属标签，列表按
+    目标装配序；**全部**目标失败仍上抛装配序第一个异常，保持调用方的整链
+    错误映射路径。源失败恒整链失败（无「部分」可言）。
 
     目标 provider 必须同时支持拉取（IScoreProvider）与上传（IScoreUpdateProvider）。
     """
@@ -300,12 +311,15 @@ async def delta_updates_chain(
         if not isinstance(tp, IScoreUpdateProvider):
             raise ValueError("Target provider does not support score updating.")
 
-    # 源成绩拉取并合并（_join：同谱面取最高记录）
-    source_scores_list = await _gather(
+    # 源成绩拉取并合并（_join：同谱面取最高记录）；源失败恒整链失败——
+    # 机台成绩拉不到就没有可比对/可上传的东西，部分成功无从谈起
+    source_ok, source_failures = await _gather(
         client, source, source_gather_callback, source_mode
     )
+    if source_failures:
+        raise source_failures[0][1]
     source_scores_unique: dict[ScoreKey, Score] = {}
-    for scores in source_scores_list:
+    for scores in source_ok:
         for score in scores:
             key = pc_key(score)
             source_scores_unique[key] = score._join(source_scores_unique.get(key, None))
@@ -313,15 +327,28 @@ async def delta_updates_chain(
     # 合并目标基准值，浅拷贝列表仍引用同一 Score 对象，快照会被污染失真
     source_scores = [replace(s) for s in source_scores_unique.values()]
 
-    # 目标成绩拉取并取交集合并（_join_rev：保守基准）
+    # 目标成绩拉取并取交集合并（_join_rev：保守基准）。基线失败的目标跳过
+    # （部分成功语义 2026-10-04 扩展到基线段）：无基线无从比对增量，盲传
+    # 可能写歪——该站从上传目标中剔除、以 (目标名, 异常) 进失败列表，幸存
+    # 站照常工作（交集随幸存基线自动收敛）。total_targets 按**装配**目标数
+    # （含基线失败者）计，供末端「全失败才上抛」判定，必须在剔除前取。
+    total_targets = sum(1 for _, ident, _ in target if ident is not None)
     target_dicts: list[dict[ScoreKey, Score]] = []
+    baseline_failures: list[tuple[str, Exception]] = []
     if compare_target:
-        target_scores_list = await _gather(
+        baseline_ok, baseline_failures = await _gather(
             client, target, target_gather_callback, target_mode
         )
         target_dicts = [
-            {pc_key(score): score for score in scores} for scores in target_scores_list
+            {pc_key(score): score for score in scores} for scores in baseline_ok
         ]
+        if baseline_failures:
+            baseline_failed = {name for name, _ in baseline_failures}
+            target = [
+                (tp, ident, kw)
+                for tp, ident, kw in target
+                if ident is None or kw.get("name", "") not in baseline_failed
+            ]
     if target_dicts:
         common_keys = set(target_dicts[0].keys())
         for d in target_dicts[1:]:
@@ -423,13 +450,15 @@ async def delta_updates_chain(
             results = merged
 
     # 部分成功语义：失败目标收集返回（异常自带归属标签）；全失败仍上抛，
-    # 由调用方既有映射给出整链错误文案
-    failures: list[tuple[str, Exception]] = [
+    # 由调用方既有映射给出整链错误文案。基线失败与上传失败对同一目标互斥
+    # （基线失败者不进上传），两段各自保持装配序，拼接即全局装配序，用户
+    # 文案失败行顺序稳定。
+    upload_failures: list[tuple[str, Exception]] = [
         (getattr(r, FAIL_TARGET_ATTR, "?"), r)
         for r in results
         if isinstance(r, Exception)
     ]
-    total_targets = sum(1 for _, ident, _ in target if ident is not None)
+    failures = baseline_failures + upload_failures
     if failures and len(failures) >= total_targets:
         raise failures[0][1]
     return skipped_unknown + prefilter_dropped, source_scores, target_dicts, failures
@@ -450,9 +479,10 @@ async def run_update(
 
     失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
     映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数, 失败目标
-    列表)。目标部分失败（至少一个站成功）不算链路失败：直接随返回值交出
-    （写权限缺失等确定性失败重试无益），pc_hook 照常触发（观测按各站已有
-    基线桥接，缺一站只是漏计不虚增）；全部目标失败/源失败仍上抛走重试。
+    列表)。目标部分失败（基线或上传段单站失败、至少一站全程成功）不算链路
+    失败：直接随返回值交出（写权限缺失、凭据过期等确定性失败重试无益），
+    pc_hook 照常触发（观测按各站已有基线桥接，缺一站只是漏计不虚增）；
+    全部目标失败/源失败仍上抛走重试。
 
     ``pc_hook``：游玩次数观测钩子，链路成功后以 (源成绩快照, 数据站基线)
     恰好调用一次（重试轮次只在成功那轮触发，不会重复计数）；钩子异常只

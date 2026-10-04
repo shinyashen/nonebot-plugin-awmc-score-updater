@@ -534,6 +534,74 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
     assert calls == [["水鱼", "落雪"], ["水鱼", "落雪"]]
 
 
+async def test_lxns_baseline_dead_partial_message(app: App, stores, monkeypatch):
+    """落雪基线拉取 401（凭据双死）进部分失败列表 → 续期 dead → 彩蛋文案
+    「导出来了，但...」+ 落雪失败行，水鱼报喜保留（2026-10-04 基线段部分
+    成功；线上落雪凭据双死事故的期望回复形状钉子）。"""
+    from fake import fake_private_message_event_v11
+    from maimai_py.exceptions import InvalidPlayerIdentifierError
+    from nonebot_plugin_awmc_helper.config import plugin_config
+    from nonebot_plugin_awmc_helper.core.binding import binding_service
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    monkeypatch.setattr(plugin_config, "awmc_lxns_client_id", "cid")
+    monkeypatch.setattr(plugin_config, "awmc_lxns_client_secret", "sec")
+    monkeypatch.setattr(plugin_config, "awmc_lxns_redirect_uri", "oob")
+    await _bind_token(df="a" * 128)
+    await _bind_lx_token("expired-token")
+    await _bind_wechat("888")
+
+    refresh_calls = []
+
+    async def fake_refresh_lxns(binding):
+        refresh_calls.append(binding)
+        return "dead"
+
+    monkeypatch.setattr(binding_service, "refresh_lxns", fake_refresh_lxns)
+
+    calls = []
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        calls.append([kw["name"] for _, _, kw in target])
+        return 1.0, 0, [("落雪", InvalidPlayerIdentifierError("Unauthorized"))]
+
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+
+    event = fake_private_message_event_v11(message="导", user_id=12345678, to_me=True)
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "导出来了，但...\n· 落雪没导上去喵："
+                        "落雪授权已过期，请重新绑定落雪\n"
+                        "导到水鱼了喵！\n你这次导了1.00秒，很厉害了喵~\n怎么导的：简单的导"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+    assert len(refresh_calls) == 1  # dead 立即改记文案，不进续期阶梯
+    assert calls == [["水鱼", "落雪"]]
+
+
 async def test_help_forward_then_guide_image(app: App, stores, monkeypatch):
     """OneBot 合并转发（M10「导分」指南页：4 文本节点 + 水鱼步骤独立纯图节点）。"""
     from fake import fake_private_message_event_v11
