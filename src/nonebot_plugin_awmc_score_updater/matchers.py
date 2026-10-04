@@ -90,14 +90,6 @@ pc_list_cmd = on_regex(
 )
 pc50_cmd = on_command("pc50", aliases={"PC50"}, block=True)
 
-
-"""落雪 OAuth access_token（JWT）形态判定复用 maimai-py 单源。
-
-注意不能以「是否 JWT」判断可写性——重绑后的新授权 token 同样是 JWT，
-需解码 payload 的 scope 声明确认（access_token 仅 15 分钟有效，主插件
-靠 refresh_token 自动续期，续期签发的 scope 随应用当前权限）。
-"""
-
 # 上传目标显示名：目标装配与失败归属判定的比较单源（比较点一律引常量）；
 # 文案句子内嵌的「水鱼/落雪」字样是完整句子而非目标名比较，不引此常量
 _TARGET_DF = "水鱼"
@@ -123,8 +115,11 @@ _LXNS_REBIND_HINT = (
 def _lxns_writable(token: str) -> bool:
     """落雪凭据是否可写成绩（scope 知识单源主插件 ``core.ext.lxns.token_writable``）。
 
-    个人 API 密钥（非 JWT）与解码失败均按可写处理（交由运行时 401 文案
-    兜底）；JWT payload 的 scope 不含 write_player 不可写。
+    不能以「是否 JWT」判断可写性——重绑后的新授权 token 同样是 JWT，需解码
+    payload 的 scope 声明确认（access_token 仅 15 分钟有效，主插件靠
+    refresh_token 自动续期，续期签发的 scope 随应用当前权限）：scope 不含
+    write_player 不可写；个人 API 密钥（非 JWT）与解码失败均按可写处理
+    （交由运行时 401 文案兜底）。
     """
     writable = token_writable(token)
     return True if writable is None else writable

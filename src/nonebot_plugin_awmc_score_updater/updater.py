@@ -29,6 +29,7 @@ from maimai_py.enums import FCType, FSType, RateType, SongType
 from maimai_py.models import Score, PlayerIdentifier
 from maimai_py.exceptions import InvalidJsonError
 from maimai_py.providers.base import IScoreProvider, IScoreUpdateProvider
+from nonebot_plugin_awmc_helper.constants import DX_ID_OFFSET
 from nonebot_plugin_awmc_helper.core.cache import TtlCache
 
 from .store import pc_key
@@ -119,7 +120,7 @@ class SaltArcadeProvider(IScoreProvider):
         kept: list[Score] = []
         dropped = 0
         for score in scores:
-            if await song_service.by_id(score.id % 10000) is not None:
+            if await song_service.by_id(score.id % DX_ID_OFFSET) is not None:
                 kept.append(score)
             else:
                 dropped += 1
@@ -371,11 +372,14 @@ async def delta_updates_chain(
     # 水鱼未收录新曲的成绩会让 update_records 服务端 500（2026-09-26 线上实测：
     # 空载荷 200、含未收录曲目 id 的载荷 500）。过滤基准 = 目标已有成绩出现过的
     # 曲目 id（目标确认收录）；500 后自动降级为仅传已收录部分并报告跳过数。
-    # 注意该集对宴谱不可作剔除依据：宴谱 6 位机台 id %10000 折回宿主曲根 id，
-    # 宿主在基线（普遍）时会漏剔水鱼未收录的宴谱——降级过滤对宴谱另显式剔除。
+    # 注意该集对宴谱不可作剔除依据：宴谱 6 位机台 id %DX_ID_OFFSET 折回宿主
+    # 曲根 id，宿主在基线（普遍）时会漏剔水鱼未收录的宴谱——降级过滤对宴谱
+    # 另显式剔除。
     # 全量模式不拉取目标、降级不可用：InvalidJsonError 按目标进 failures
     # （部分成功语义），单目标全败才整链上抛（与原 updates_chain 一致）。
-    known_song_ids = {score.id % 10000 for d in target_dicts for score in d.values()}
+    known_song_ids = {
+        score.id % DX_ID_OFFSET for d in target_dicts for score in d.values()
+    }
     skipped_unknown = 0
 
     # 落雪预过滤（kwargs.allowed_ids，见 _lxns_known_song_ids）：其曲库已删除
@@ -436,23 +440,28 @@ async def delta_updates_chain(
     # 全量模式（compare_target=False）无 known_song_ids（不拉目标）：过滤集
     # 恒空、重传不可用——InvalidJsonError 全走 failures，不得虚报 skipped
     if compare_target and any(isinstance(r, InvalidJsonError) for r in results):
-        # 宴谱显式剔除：宴谱 6 位机台 id %10000 折回宿主曲根 id，宿主在基线
-        # （普遍）时上式判定不出未收录 → 重传再 500 整批失败且文案误导
+        # 宴谱显式剔除：宴谱 6 位机台 id %DX_ID_OFFSET 折回宿主曲根 id，宿主
+        # 在基线（普遍）时上式判定不出未收录 → 重传再 500 整批失败且文案误导
         # （2026-10-04 行为修复）；被剔除的宴谱计入 skipped（静默跳过口径）
         filtered = [
             s
             for s in delta_scores
-            if s.type != SongType.UTAGE and s.id % 10000 in known_song_ids
+            if s.type != SongType.UTAGE and s.id % DX_ID_OFFSET in known_song_ids
         ]
         skipped_unknown = len(delta_scores) - len(filtered)
         if filtered and skipped_unknown:
             # 仅对返回 InvalidJsonError 的目标降级重传已收录部分：已成功站
             # 重传纯浪费（配额/去重），其他原因失败站重传也改不了结果；
-            # failures 按目标合并两轮结果（首轮其他目标结果保留）
-            retry_idx = [
-                i for i, r in enumerate(results) if isinstance(r, InvalidJsonError)
+            # failures 按目标合并两轮结果（首轮其他目标结果保留）。
+            # 首轮失败目标以 (results 下标, 目标名) 记录——合并按目标名对位，
+            # 不按位置：重传轮的 allowed_ids 空批短路会让部分 retry 目标缺席
+            # _schedule_upload，按位对位会 IndexError/结果错位归属
+            retry_targets = [
+                (i, upload_names[i])
+                for i, r in enumerate(results)
+                if isinstance(r, InvalidJsonError)
             ]
-            retry_names = {upload_names[i] for i in retry_idx}
+            retry_names = {name for _, name in retry_targets}
             logger.warning(
                 f"{'、'.join(retry_names)}拒绝上传（含未收录曲目成绩），"
                 f"剔除 {skipped_unknown} 条后重传已收录部分"
@@ -462,9 +471,13 @@ async def delta_updates_chain(
             await _schedule_upload(filtered, only_names=retry_names)
             retry_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
             merged = list(results)
-            # 重传轮沿用 target 遍历序，与 retry_idx 的首轮顺序一一对应
-            for local_i, global_i in enumerate(retry_idx):
-                merged[global_i] = retry_results[local_i]
+            # 重传轮的 upload_names 与 retry_results 一一对应 → 目标名查得到
+            # 才覆盖；查不到（该站重传批被过滤为空等短路，重传轮没跑成）保持
+            # 首轮的 InvalidJsonError 不覆盖，失败归属维持首轮语义
+            retry_by_name = dict(zip(upload_names, retry_results))
+            for global_i, name in retry_targets:
+                if name in retry_by_name:
+                    merged[global_i] = retry_by_name[name]
             results = merged
 
     # 部分成功语义：失败目标收集返回（异常自带归属标签）；全失败仍上抛，

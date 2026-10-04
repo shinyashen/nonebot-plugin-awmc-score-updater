@@ -825,6 +825,95 @@ async def test_delta_chain_invalid_json_retry_narrowed_to_failed_targets(songs):
     assert [s.id for s in water.updates[0]] == [199]
 
 
+async def test_delta_chain_retry_target_skipped_by_allowed_ids_keeps_first_failure(
+    songs,
+):
+    """降级重传两轮结果按目标名对位（2026-10-04 追加轮审查修复）：
+
+    双目标同轮 InvalidJsonError + 其中一站（落雪，allowed_ids={624}）的重传
+    批被过滤为空 → 该站缺席重传轮。修复前按位置对位（重传轮沿 target 序
+    与 retry_idx 一一对应的假设被 _schedule_upload 的空批短路打破）：
+    retry_results 短于 retry_idx → IndexError。修复后按名对位：缺席站保持
+    首轮 InvalidJsonError 不覆盖（重传轮没跑成，失败归属维持首轮语义），
+    跑成的站正常覆盖为成功。
+    """
+    from maimai_py.exceptions import InvalidJsonError
+
+    from nonebot_plugin_awmc_score_updater.updater import (
+        FAIL_TARGET_ATTR,
+        delta_updates_chain,
+    )
+
+    client = await _make_client()
+    source = FakeUpdateProvider(
+        [
+            mk_score(song_id=199, achievements=100.0, dx_score=2500),
+            # 624 仅 SD 谱且不在任何基线 → 降级过滤（known_song_ids）剔除
+            mk_score(
+                song_id=624,
+                achievements=100.0,
+                dx_score=2500,
+                song_type=SongType.STANDARD,
+            ),
+        ]
+    )
+
+    class JsonBrokenProvider(FakeUpdateProvider):
+        """上传恒抛 InvalidJsonError（模拟服务端 500 HTML 整批拒绝）。"""
+
+        def __init__(self, scores=None):
+            super().__init__(scores)
+            self.update_calls = 0
+
+        async def update_scores(self, identifier, scores, client):
+            self.update_calls += 1
+            raise InvalidJsonError("<html>500</html>")
+
+    class JsonFlakyProvider(FakeUpdateProvider):
+        """首轮上传抛 InvalidJsonError，重传成功。"""
+
+        def __init__(self, scores=None):
+            super().__init__(scores)
+            self.update_calls = 0
+
+        async def update_scores(self, identifier, scores, client):
+            self.update_calls += 1
+            if self.update_calls == 1:
+                raise InvalidJsonError("<html>500</html>")
+            self.updates.append(list(scores))
+            self.scores.extend(scores)
+
+    lxns = JsonBrokenProvider([mk_score(achievements=99.0, dx_score=2000)])
+    water = JsonFlakyProvider([mk_score(achievements=99.0, dx_score=2000)])
+    src = [(source, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    # 落雪在前：修复前按位对位时 retry_results（长度 1）与 retry_idx（长度 2）
+    # 错位 → IndexError，回归锚
+    targets = [
+        (
+            lxns,
+            PlayerIdentifier(credentials="l"),
+            {"name": "落雪", "allowed_ids": {624}},
+        ),
+        (water, PlayerIdentifier(credentials="w"), {"name": "水鱼"}),
+    ]
+
+    skipped, _, _, failures = await delta_updates_chain(client, src, targets)
+
+    # skipped 口径：624 降级剔除（known_song_ids 不含）+ 199 被落雪 allowed_ids 预过滤
+    assert skipped == 2
+    # 落雪首轮批 [624] 触发 InvalidJsonError；重传批 [199] 被 allowed_ids={624}
+    # 过滤为空 → 缺席重传轮，保持首轮异常不覆盖（不炸、失败归属不变）
+    assert [(n, type(e).__name__) for n, e in failures] == [
+        ("落雪", "InvalidJsonError")
+    ]
+    assert getattr(failures[0][1], FAIL_TARGET_ATTR, None) == "落雪"
+    assert lxns.update_calls == 1  # 空批短路，未重传
+    assert lxns.updates == []
+    # 水鱼降级重传成功，载荷只带已收录的 199
+    assert water.update_calls == 2
+    assert [s.id for s in water.updates[0]] == [199]
+
+
 async def test_delta_chain_full_mode_invalid_json_goes_failures(songs):
     """全量模式（compare_target=False）InvalidJsonError 走 failures 不虚报
     skipped：无目标基线时过滤集恒空、重传不可用——旧实现把整批计成

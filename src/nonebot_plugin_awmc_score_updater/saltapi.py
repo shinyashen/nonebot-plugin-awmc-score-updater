@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 from maimai_py.enums import FCType, FSType, RateType, SongType, LevelIndex
 from maimai_py.models import Score
+from nonebot_plugin_awmc_helper.constants import DX_ID_OFFSET, UTAGE_ID_BASE
 from nonebot_plugin_awmc_helper.core.http import create_smart_client
 
 _client: httpx.AsyncClient | None = None
@@ -137,7 +138,8 @@ async def fetch_score_payload(
 def deser_score(raw: dict[str, Any]) -> Score:
     """SaltNet 成绩明细 → maimai-py :class:`Score`。
 
-    - id：DX 谱（id>10000）折回曲目 id；宴明细（>100000）保留 6 位机台内部 id；
+    - id：DX 谱（id>DX_ID_OFFSET）折回曲目 id；宴明细（>UTAGE_ID_BASE）
+      保留 6 位机台内部 id；
     - level_index：宴明细的 level 值为 10，超常规枚举范围一律取 LevelIndex(0)
       （maimai-py 约定宴谱 level_index 恒为 0）；
     - fc：SaltNet 状态码 1-4 按 ``4 - n`` 映射 FCType；101.0000% 视为 APP；
@@ -152,7 +154,7 @@ def deser_score(raw: dict[str, Any]) -> Score:
     sync = int(raw["syncStatus"])
     raw_pc = raw.get("playCount")
     return Score(
-        id=song_id if song_id > 100000 else song_id % 10000,
+        id=song_id if song_id > UTAGE_ID_BASE else song_id % DX_ID_OFFSET,
         # maimai_py 注解 level: str 偏紧：上传序列化（水鱼/落雪 _ser_score）只
         # 消费 level_index，不读该字段，None 运行时安全
         level=None,  # type: ignore[reportArgumentType]
