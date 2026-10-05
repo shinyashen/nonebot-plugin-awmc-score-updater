@@ -37,6 +37,32 @@ def test_extract_qrcode_invalid():
     assert extract_qrcode("") is None
 
 
+def test_looks_like_qrcode():
+    from nonebot_plugin_awmc_score_updater.saltapi import looks_like_qrcode
+
+    # 形似 = 前缀命中（长度/链接格式不合法也视作「尝试过导二维码」）
+    assert looks_like_qrcode(SGWCMAID)
+    assert looks_like_qrcode("SGWCMAID123")  # 长度不符也形似
+    assert looks_like_qrcode(f"https://mai.paradproject.com/?t=MAID{'x' * 64}")
+    assert looks_like_qrcode("http://example.com/MAIDxx")
+    # 不形似：日常词、普通文本（导指令据此静默跳过不响应）
+    assert not looks_like_qrcode("随便什么")
+    assert not looks_like_qrcode("导演")
+    assert not looks_like_qrcode("")
+
+
+def test_looks_like_qrcode_covers_extract_success():
+    """一致性：extract_qrcode 能解析的输入必形似（前缀常量共用，防漂移）。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import (
+        extract_qrcode,
+        looks_like_qrcode,
+    )
+
+    for text in (SGWCMAID, f"https://mai.paradproject.com/?t=MAID{'x' * 64}"):
+        assert extract_qrcode(text) is not None
+        assert looks_like_qrcode(text)
+
+
 @respx.mock
 async def test_parse_qrcode_ok():
     from nonebot_plugin_awmc_score_updater.saltapi import parse_qrcode

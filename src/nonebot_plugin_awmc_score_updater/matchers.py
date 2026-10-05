@@ -75,7 +75,7 @@ from nonebot_plugin_awmc_helper.core.render.best50 import best50_bytes
 
 from .store import pc_key, row_key, wechat_store, play_count_store
 from .config import plugin_config
-from .saltapi import SaltApiError, parse_qrcode, extract_qrcode
+from .saltapi import SaltApiError, parse_qrcode, extract_qrcode, looks_like_qrcode
 from .updater import FAIL_TARGET_ATTR, SaltArcadeProvider, run_update
 
 update_cmd = on_command("导", aliases={"传分", "上传分数", "wmupdate"}, block=True)
@@ -415,6 +415,12 @@ async def _(
             f"{_g.intro}\n前置条件：{_g.prerequisites}\n发送「导帮助」查看分步流程"
         ).finish(at_sender=True)
     qr_input = parts[0] if parts else None
+    # 仅形似二维码（SGWCMAID/http 前缀）的内容视作全量上传参数：格式不合法
+    # 由 _resolve_qrcode 照常提示格式错误；其余文本（「导一下」「导演」等
+    # 日常语命中指令）静默跳过不响应——不回落简略上传，单独一个「导」才
+    # 保持默认行为（2026-10-05）
+    if qr_input is not None and not looks_like_qrcode(qr_input):
+        return
 
     # 全量上传（带二维码）的群白名单门禁；简略上传群聊不受限
     if qr_input and session.scene.type == SceneType.GROUP:

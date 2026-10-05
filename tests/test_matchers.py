@@ -160,6 +160,85 @@ async def test_private_simple_update_unbound(app: App, stores):
     )
 
 
+async def test_update_cmd_plain_text_silent(app: App, stores):
+    """「导」后跟非二维码内容（不以 SGWCMAID/http 开头）→ 静默跳过不响应：
+    「导一下」等日常语命中指令不再回复格式错误，也不回落简略上传——未绑
+    定库同样无声（静默先于全部前置检查，2026-10-05）。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    event = fake_private_message_event_v11(
+        message="导 随便什么文本", user_id=12345678, to_me=True
+    )
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        # 无任何回复与查询：静默跳过
+
+
+async def test_group_plain_text_silent(app: App, stores):
+    """群内「导 + 非二维码文本」同样静默，且先于全量上传白名单门禁：
+    非白名单群不弹「请私聊使用」，除 Session 构建的群信息预取外无任何
+    查询与回复。"""
+    import nonebot
+    from fake import fake_group_message_event_v11
+    from nonebot.adapters.onebot.v11 import Bot
+    from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    event = fake_group_message_event_v11(message="导 随便什么文本")
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.should_call_api(
+            "get_group_info",
+            {"group_id": 87654321},
+            result={
+                "group_id": 87654321,
+                "group_name": "g",
+                "member_count": 1,
+                "max_member_count": 10,
+            },
+        )
+        ctx.should_call_api(
+            "get_group_member_info",
+            {"group_id": 87654321, "user_id": event.user_id, "no_cache": True},
+            result={
+                "user_id": event.user_id,
+                "role": "member",
+                "card": "",
+                "nickname": "t",
+            },
+        )
+        ctx.receive_event(bot, event)
+        # 无回复、无 getQRInfo/绑定库访问：静默先于白名单门禁与前置检查
+
+
+async def test_update_cmd_qr_like_malformed_errors(app: App, stores):
+    """形似二维码但格式不合法（SGWCMAID 长度不符）→ 照常提示格式错误。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+    event = fake_private_message_event_v11(
+        message="导 SGWCMAID123", user_id=12345678, to_me=True
+    )
+    await _send(
+        app,
+        matchers.update_cmd,
+        event,
+        "请提供正确格式的内容(SGWCMAID.../https...)！",
+        private=True,
+    )
+
+
 @respx.mock
 async def test_bindwx_success(app: App, stores):
     from fake import fake_private_message_event_v11

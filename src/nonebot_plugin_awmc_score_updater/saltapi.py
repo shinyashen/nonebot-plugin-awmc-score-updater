@@ -24,6 +24,8 @@ _TIMEOUT = httpx.Timeout(connect=10, read=60, write=10, pool=10)
 
 # 二维码协议常数（原版 Hoshino 插件同款）：机台识别原文为 SGWCMAID 前缀
 # 84 位、有效内容取尾 64 位；页面链接形态截取 MAID 段后至多 76 字符再取尾 64
+_QR_RAW_PREFIX = "SGWCMAID"
+_QR_LINK_PREFIX = "http"
 _QR_RAW_LEN = 84
 _QR_CORE_LEN = 64
 _QR_MAID_WINDOW = 76
@@ -51,6 +53,17 @@ class SaltApiError(Exception):
     """SaltNet 主备域名均不可用或业务失败（message 面向用户可读）。"""
 
 
+def looks_like_qrcode(text: str) -> bool:
+    """输入是否形似二维码内容（``SGWCMAID`` 原文或 http 链接开头）。
+
+    前缀判定与 :func:`extract_qrcode` 同源（共用常量）：「导」指令以此区分
+    「形似二维码但格式不合法」（照常提示格式错误）与「跟在导后的无关文本」
+    （日常词、口头语等，静默跳过不响应）。
+    """
+    text = text.strip()
+    return text.startswith(_QR_RAW_PREFIX) or text.startswith(_QR_LINK_PREFIX)
+
+
 def extract_qrcode(text: str) -> str | None:
     """从用户输入提取 64 位二维码内容，不合法返回 None。
 
@@ -58,9 +71,9 @@ def extract_qrcode(text: str) -> str | None:
     或二维码页面的 https 链接（截取 ``MAID`` 段的尾 64 位）。
     """
     text = text.strip()
-    if text.startswith("SGWCMAID") and len(text) == _QR_RAW_LEN:
+    if text.startswith(_QR_RAW_PREFIX) and len(text) == _QR_RAW_LEN:
         return text[-_QR_CORE_LEN:]
-    if text.startswith("http"):
+    if text.startswith(_QR_LINK_PREFIX):
         if matches := re.findall(rf"MAID.{{0,{_QR_MAID_WINDOW}}}", text):
             return matches[0][-_QR_CORE_LEN:]
     return None
