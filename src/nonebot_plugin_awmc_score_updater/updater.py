@@ -33,7 +33,12 @@ from nonebot_plugin_awmc_helper.constants import DX_ID_OFFSET
 from nonebot_plugin_awmc_helper.core.cache import TtlCache
 
 from .store import pc_key
-from .saltapi import SaltApiError, deser_score, fetch_score_payload
+from .saltapi import (
+    SaltApiError,
+    SaltApiBusinessError,
+    deser_score,
+    fetch_score_payload,
+)
 
 # 谱面键：(曲目 id, SongType.value, LevelIndex.value)——统一复用 store.pc_key，
 # 供游玩次数桥接（observe 按 pc_key 元组取基线）与上传比对共用；字符串键与
@@ -509,7 +514,9 @@ async def run_update(
     """执行一次传分：全量（跳过目标比对）或增量（与目标比对只传提升）。
 
     失败按指数退避重试（0.5s 起），重试耗尽后抛最后一次的异常，由调用方
-    映射为用户文案。返回 (用时秒, 被数据站拒绝而跳过的成绩条数, 失败目标
+    映射为用户文案。**业务拒绝（:class:`SaltApiBusinessError`，二维码已用/
+    过期/账号不匹配等）不重试**——重试无益且可能重复消费一次性二维码，直接
+    上抛。返回 (用时秒, 被数据站拒绝而跳过的成绩条数, 失败目标
     列表)。目标部分失败（基线或上传段单站失败、至少一站全程成功）不算链路
     失败：直接随返回值交出（写权限缺失、凭据过期等确定性失败重试无益），
     pc_hook 照常触发（观测按各站已有基线桥接，缺一站只是漏计不虚增）；
@@ -583,6 +590,10 @@ async def run_update(
                 except Exception:
                     logger.warning("游玩次数观测失败（不影响本次导分）")
             return time.monotonic() - start, skipped, failures
+        except SaltApiBusinessError:
+            # 二维码业务拒绝（无效/已用/过期/账号不匹配）：重试无益，且可能
+            # 重复消费同一枚一次性二维码——直接上抛给 handler 展示业务文案
+            raise
         except Exception as e:  # 统一退避重试后交给调用方
             last_exc = e
             if attempt >= max_retries:

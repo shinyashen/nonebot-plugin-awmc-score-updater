@@ -13,6 +13,7 @@ from nonebug import App
 MAIN = "https://salt_api_main.realtvop.top"
 
 SGWCMAID = "SGWCMAID" + "0" * (84 - len("SGWCMAID"))
+QR64 = SGWCMAID[-64:]
 
 
 @pytest.fixture
@@ -126,14 +127,18 @@ async def test_group_qr_denied_by_default(app: App, stores):
 async def test_group_qr_allowed_in_whitelist_then_unbound(
     app: App, stores, monkeypatch
 ):
-    """白名单群放行二维码解析，随后因未绑定 token 引导去主插件。"""
+    """白名单群放行二维码后因未绑定 token 引导去主插件（不触二维码解析）。
+
+    「导 + 二维码」不得调用 /getQRInfo（一次性凭证，预检会先把二维码消费
+    掉）——本用例在前置检查即终止，断言解析路由未被调用。
+    """
     from fake import fake_group_message_event_v11
 
     from nonebot_plugin_awmc_score_updater import matchers
     from nonebot_plugin_awmc_score_updater.config import plugin_config
 
     monkeypatch.setattr(plugin_config, "awmc_su_whitelist_groups", ["87654321"])
-    respx.post(f"{MAIN}/getQRInfo").mock(
+    qr_info = respx.post(f"{MAIN}/getQRInfo").mock(
         return_value=Response(200, json={"errorID": 0, "userID": "888"})
     )
     event = fake_group_message_event_v11(message=f"导 {SGWCMAID}")
@@ -143,6 +148,7 @@ async def test_group_qr_allowed_in_whitelist_then_unbound(
         event,
         "没绑数据站你怎么导。。。先对我说“导帮助”看看怎么绑定喵",
     )
+    assert not qr_info.called  # 导流程不做 /getQRInfo 预检
 
 
 async def test_private_simple_update_unbound(app: App, stores):
@@ -272,22 +278,111 @@ async def test_bindwx_rejected_in_group(app: App, stores):
 
 @respx.mock
 async def test_full_update_account_mismatch(app: App, stores):
-    """全量上传二维码与已绑机台账号不符 → 拒绝。"""
+    """全量上传二维码与已绑机台账号不符 → 服务端 updateUser 返回 91，
+    用户收到业务拒绝文案。
+
+    客户端不再预检（预检需 /getQRInfo，会把一次性二维码先用掉）；归属校验
+    由服务端「账号与二维码不匹配」承担，错误经 SaltApiBusinessError 直达用户。
+    """
     from fake import fake_private_message_event_v11
 
     from nonebot_plugin_awmc_score_updater import matchers
 
     await _bind_token(df="a" * 128)
     await _bind_wechat("111")
-    respx.post(f"{MAIN}/getQRInfo").mock(
+    qr_info = respx.post(f"{MAIN}/getQRInfo").mock(
         return_value=Response(200, json={"errorID": 0, "userID": "222"})
+    )
+    update = respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(
+            200,
+            json={
+                "errorID": 91,
+                "error": "userId(111) 与二维码账号(222)不匹配",
+            },
+        )
     )
     event = fake_private_message_event_v11(
         message=f"导 {SGWCMAID}", user_id=12345678, to_me=True
     )
-    await _send(
-        app, matchers.update_cmd, event, "怎么，还想帮别人导一导？", private=True
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("userId(111) 与二维码账号(222)不匹配")]),
+            result=None,
+            bot=bot,
+        )
+    assert qr_info.call_count == 0  # 导流程不调 /getQRInfo（一次性凭证）
+    assert update.call_count == 1  # 二维码只交给 /updateUser 消费一次
+
+
+@respx.mock
+async def test_full_update_does_not_call_get_qr_info(app: App, stores, monkeypatch):
+    """「导 <二维码>」只在本地提取，不调 /getQRInfo：二维码原样交给
+    /updateUser 全量拉取消费一次（一次性凭证下预检会让二维码先被用掉）。"""
+    from fake import fake_private_message_event_v11
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    captured: dict = {}
+
+    async def fake_run_update(
+        client, source, target, *, full, max_retries, pc_hook=None
+    ):
+        assert full is True  # 带二维码 = 全量
+        captured["qrcode"] = source[0][1].credentials["qrcode"]
+        return 1.0, 0, []
+
+    monkeypatch.setattr(matchers, "run_update", fake_run_update)
+    qr_info = respx.post(f"{MAIN}/getQRInfo").mock(
+        return_value=Response(200, json={"errorID": 0, "userID": "888"})
     )
+    await _bind_token(df="a" * 128)
+    await _bind_wechat("888")
+
+    event = fake_private_message_event_v11(
+        message=f"导 {SGWCMAID}", user_id=12345678, to_me=True
+    )
+    async with app.test_matcher(matchers.update_cmd) as ctx:
+        import nonebot
+        from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+        from nonebot.adapters.onebot.v11 import Adapter as OnebotV11Adapter
+
+        bot = ctx.create_bot(base=Bot, adapter=nonebot.get_adapter(OnebotV11Adapter))
+        ctx.receive_event(bot, event)
+        ctx.should_call_send(
+            event,
+            Message([MessageSegment.text("推分了？你先别急")]),
+            result=None,
+            bot=bot,
+        )
+        ctx.should_call_send(
+            event,
+            Message(
+                [
+                    MessageSegment.text(
+                        "导到水鱼了喵！\n你这次导了1.00秒，很厉害了喵~\n"
+                        "怎么导的：好好的导"
+                    )
+                ]
+            ),
+            result=None,
+            bot=bot,
+        )
+    assert captured["qrcode"] == QR64  # 本地提取结果原样交给全量拉取
+    assert qr_info.call_count == 0
 
 
 @respx.mock

@@ -225,6 +225,10 @@ async def _hint_if_uncalibrated(wb, *, page: int = 1) -> None:
 async def _resolve_qrcode(text: str) -> tuple[str, str]:
     """解析二维码参数 → (二维码内容, 华立 userID)，业务失败抛 SaltApiError 子类文案。
 
+    ⚠️ 仅供「绑定微信」使用：``/getQRInfo`` 会**消费一枚二维码**（一次性
+    凭证）。「导 <二维码>」不得调用本函数，否则同一枚二维码先被解析消费、
+    随后 ``/updateUser`` 必被拒。
+
     这里直接以 :class:`SaltApiError` 承载用户文案（handle_errors 展示 str(e)）。
     """
     qr = extract_qrcode(text)
@@ -469,16 +473,14 @@ async def _(
     async with lock:
         qrcode: str | None = None
         if qr_input:
-            qr, arcade_user_id = await _resolve_qrcode(qr_input)
-            if arcade_user_id != wb.arcade_user_id:
-                msg = (
-                    "怎么，还想帮别人导一导？"
-                    if special
-                    else "你提供的二维码所对应账号与已绑定的账号不匹配，"
-                    "请检查后重新输入"
-                )
-                await UniMessage.text(f" {msg}").finish(at_sender=True)
-            qrcode = qr
+            # 二维码一次性（2026-10 实测定性）：绑定微信经 /getQRInfo 消费一枚；
+            # 「导 <二维码>」把该二维码**直接交给 /updateUser 消费一次**，此处
+            # 只做本地提取，不得预检（再调 /getQRInfo 会先把二维码用掉，随后
+            # updateUser 必被拒）。账号是否匹配由服务端 updateUser 返回
+            # errorID=91（SaltApiBusinessError），在导分失败时展示明确文案。
+            qrcode = extract_qrcode(qr_input)
+            if qrcode is None:
+                raise SaltApiError("请提供正确格式的内容(SGWCMAID.../https...)！")
 
         if wb.last_update:
             hint = (

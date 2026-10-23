@@ -354,6 +354,44 @@ async def test_run_update_retries_then_succeeds(songs):
     assert call_count["n"] == 2
 
 
+async def test_run_update_does_not_retry_business_error(songs, monkeypatch):
+    """业务拒绝（SaltApiBusinessError）不进退避重试：
+
+    二维码已用/过期/账号不匹配重试无益，且可能重复消费同一枚一次性二维码
+    ——源首次抛即上抛，不睡退避、不重复取数（可用性类异常仍走原重试）。
+    """
+    import asyncio
+
+    from nonebot_plugin_awmc_score_updater.saltapi import SaltApiBusinessError
+    from nonebot_plugin_awmc_score_updater.updater import run_update
+
+    client = await _make_client()
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class BusinessRejectSource(FakeUpdateProvider):
+        async def get_scores_all(self, identifier, client):
+            self.fetch_count += 1
+            raise SaltApiBusinessError(
+                "二维码无效、已使用或已过期（一次性凭证），请重新获取"
+            )
+
+    source_provider = BusinessRejectSource([])
+    target = FakeUpdateProvider([])
+    src = [(source_provider, PlayerIdentifier(credentials="x"), {"name": "机台"})]
+    targets = [(target, PlayerIdentifier(credentials="t"), {"name": "水鱼"})]
+
+    with pytest.raises(SaltApiBusinessError, match="已使用或已过期"):
+        await run_update(client, src, targets, full=True, max_retries=3)
+    assert source_provider.fetch_count == 1  # 只取一次：不重试
+    assert sleeps == []  # 不进退避
+    assert target.fetch_count == 0  # 全量模式不拉目标基线
+
+
 async def test_run_update_full_chain(songs):
     from nonebot_plugin_awmc_score_updater.updater import run_update
 

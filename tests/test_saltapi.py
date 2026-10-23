@@ -75,18 +75,44 @@ async def test_parse_qrcode_ok():
 
 @respx.mock
 async def test_parse_qrcode_business_reject_no_fallback():
-    """业务拒绝（errorID != 0）不重试备用域名。"""
-    from nonebot_plugin_awmc_score_updater.saltapi import parse_qrcode
+    """业务拒绝（errorID != 0）抛 SaltApiBusinessError，不重试备用域名。
+
+    一次性凭证下「已使用/已过期」由服务端同码返回（1/2），文案提示重新获取。
+    """
+    from nonebot_plugin_awmc_score_updater.saltapi import (
+        SaltApiBusinessError,
+        parse_qrcode,
+    )
 
     main = respx.post(f"{MAIN}/getQRInfo").mock(
         return_value=Response(200, json={"errorID": 1})
     )
     fallback = respx.post(f"{FALLBACK}/getQRInfo").mock(
-        return_value=Response(200, json={"errorID": 0})
+        return_value=Response(200, json={"errorID": 0, "userID": "42"})
     )
-    assert await parse_qrcode(QR64, main_url=MAIN, fallback_url=FALLBACK) is None
+    with pytest.raises(
+        SaltApiBusinessError, match="二维码无效、已使用或已过期（一次性凭证）"
+    ):
+        await parse_qrcode(QR64, main_url=MAIN, fallback_url=FALLBACK)
     assert main.called
     assert not fallback.called
+
+
+@respx.mock
+async def test_parse_qrcode_business_reject_prefers_server_message():
+    """业务拒绝文案优先透传服务端 ``error`` 字段（比契约码表更具体）。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import (
+        SaltApiBusinessError,
+        parse_qrcode,
+    )
+
+    respx.post(f"{MAIN}/getQRInfo").mock(
+        return_value=Response(
+            200, json={"errorID": 2, "error": "二维码已过期（10 分钟窗口），请重新获取"}
+        )
+    )
+    with pytest.raises(SaltApiBusinessError, match="二维码已过期（10 分钟窗口）"):
+        await parse_qrcode(QR64, main_url=MAIN, fallback_url=FALLBACK)
 
 
 @respx.mock
@@ -143,6 +169,55 @@ async def test_fetch_score_payload_html_body_raises_saltapi_error():
     assert not fallback.called
 
 
+@respx.mock
+async def test_fetch_score_payload_business_reject_prefers_server_message():
+    """200+errorID=2（二维码一次性已用/过期）：抛 SaltApiBusinessError，文案取
+    ``error`` 字段——修复前业务拒绝被静默当成空成绩列表，用户只看到「导了 0 条」。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import (
+        SaltApiBusinessError,
+        fetch_score_payload,
+    )
+
+    respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(
+            200, json={"errorID": 2, "error": "二维码已使用，请重新获取"}
+        )
+    )
+    fallback = respx.post(f"{FALLBACK}/updateUser").mock(
+        return_value=Response(200, json={"errorID": 0, "userMusicList": []})
+    )
+    with pytest.raises(SaltApiBusinessError, match="二维码已使用，请重新获取"):
+        await fetch_score_payload("42", QR64, main_url=MAIN, fallback_url=FALLBACK)
+    # 业务拒绝不回退备域（备用域名结果相同，且二维码已被消费）
+    assert not fallback.called
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("error_id", "expected"),
+    [
+        (1, "二维码无效、已使用或已过期（一次性凭证）"),
+        (91, "你提供的二维码所对应账号与已绑定的账号不匹配，请检查后重新输入"),
+        (99, "二维码格式无效"),
+        (54, "二维码服务配置异常（errorID=54）"),
+        (57, "二维码服务配置异常（errorID=57）"),
+        (50, "二维码解析失败（errorID=50）"),
+    ],
+)
+async def test_fetch_score_payload_business_reject_fallback_message(error_id, expected):
+    """无 ``error`` 字段时按 errorID 退化：1/2、91、99、54/57 及未知码。"""
+    from nonebot_plugin_awmc_score_updater.saltapi import (
+        SaltApiBusinessError,
+        fetch_score_payload,
+    )
+
+    respx.post(f"{MAIN}/updateUser").mock(
+        return_value=Response(200, json={"errorID": error_id})
+    )
+    with pytest.raises(SaltApiBusinessError, match=expected):
+        await fetch_score_payload("42", QR64, main_url=MAIN, fallback_url=FALLBACK)
+
+
 def _detail(
     music_id: int, level: int = 3, achievement: int = 1005000, combo: int = 0
 ) -> dict:
@@ -162,10 +237,11 @@ async def test_fetch_score_payload_flatten():
     from nonebot_plugin_awmc_score_updater.saltapi import fetch_score_payload
 
     payload = {
+        "errorID": 0,
         "userMusicList": [
             {"userMusicDetailList": [_detail(199, combo=1), _detail(10199)]},
             {"userMusicDetailList": [_detail(624)]},
-        ]
+        ],
     }
     respx.post(f"{MAIN}/updateUser").mock(return_value=Response(200, json=payload))
     rows = await fetch_score_payload("42", None, main_url=MAIN, fallback_url=FALLBACK)

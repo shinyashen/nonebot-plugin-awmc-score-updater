@@ -4,6 +4,12 @@ maimai-py 未覆盖的外部接口：机台二维码解析（``/getQRInfo``）�
 拉取（``/updateUser``）。主域名失败自动回退备用域名；业务性拒绝（如二维码
 过期）直接返回，不重试备用域名。
 
+⚠️ 华立机台二维码自 2026-10 起是**一次性凭证**：``/getQRInfo`` 与
+``/updateUser`` 各会消费同一枚二维码一次，同一枚二维码**不能**先解析再拉取。
+两个接口因此各管一条链路：:func:`parse_qrcode` 供「绑定微信」消费一枚；
+:func:`fetch_score_payload` 带 ``qrcode`` 时由 ``/updateUser`` 消费一枚（全量
+拉取）——调用方不得在同一枚二维码上串用两个接口。
+
 参考实现：HoshinoBot 版 maimai-score-updater（本插件的前身）。
 """
 
@@ -53,6 +59,42 @@ class SaltApiError(Exception):
     """SaltNet 主备域名均不可用或业务失败（message 面向用户可读）。"""
 
 
+class SaltApiBusinessError(SaltApiError):
+    """华立/代理业务拒绝（二维码已用/过期/账号不匹配等）：重试无益。"""
+
+
+# 业务拒绝的退化文案：服务端未给 error 字段时按 errorID 映射。errorID 语义
+# 与 awmc-wahlap-api 契约同源（/getQRInfo 与 /updateUser 共用一套）：
+# 1/2 无效·已用·过期（一次性凭证）、91 账号不匹配、99 格式无效、
+# 54/57 服务端配置异常（缺 titlekey / 请求头不合规，文案需带码便于运维定位）
+_BUSINESS_ERROR_MESSAGES: dict[int, str] = {
+    1: "二维码无效、已使用或已过期（一次性凭证），请重新获取",
+    2: "二维码无效、已使用或已过期（一次性凭证），请重新获取",
+    91: "你提供的二维码所对应账号与已绑定的账号不匹配，请检查后重新输入",
+    99: "二维码格式无效",
+}
+
+
+def _business_error_message(data: dict[str, Any]) -> str:
+    """业务拒绝的用户文案：优先服务端 ``error`` 字段，缺失时按 errorID 退化。
+
+    服务端的 error 文案通常更具体（如「二维码已过期（10 分钟窗口）」），能
+    直接展示给用户；字段缺失（旧服务端/上游异常）时按契约码表兜底，54/57
+    这类部署侧异常附上 errorID 便于反馈运维，未知码也不吞掉码值。
+    """
+    if isinstance(error := data.get("error"), str) and error.strip():
+        return error.strip()
+    try:
+        code = int(data.get("errorID"))
+    except (TypeError, ValueError):
+        return f"二维码解析失败（errorID={data.get('errorID')}）"
+    if code in (1, 2):
+        return _BUSINESS_ERROR_MESSAGES[1]
+    if code in (54, 57):
+        return f"二维码服务配置异常（errorID={code}）"
+    return _BUSINESS_ERROR_MESSAGES.get(code, f"二维码解析失败（errorID={code}）")
+
+
 def looks_like_qrcode(text: str) -> bool:
     """输入是否形似二维码内容（``SGWCMAID`` 原文或 http 链接开头）。
 
@@ -82,8 +124,14 @@ def extract_qrcode(text: str) -> str | None:
 async def parse_qrcode(qr_code: str, *, main_url: str, fallback_url: str) -> str | None:
     """调 ``/getQRInfo`` 解析二维码，成功返回华立 userID（字符串）。
 
-    二维码无效/过期（errorID != 0）返回 None——业务性拒绝，备用域名结果
-    相同，不重试；主备域名网络/HTTP 均失败抛 :class:`SaltApiError`。
+    ⚠️ 本接口会**消费一枚二维码**（一次性凭证），仅供「绑定微信」链路使用；
+    「导 <二维码>」不得调用本函数（否则同一枚二维码被消费后 ``/updateUser``
+    必然被拒）。
+
+    业务拒绝（errorID != 0，如已使用/已过期/格式无效）抛
+    :class:`SaltApiBusinessError`——备用域名结果相同，不重试；主备域名网络/
+    HTTP 均失败抛 :class:`SaltApiError`。errorID=0 但缺 userID 的异常响应仍
+    返回 None（网关异常响应，不能 ``str(None)`` 绑成 "None" 字符串落库）。
     """
     payload = {"qrCode": qr_code}
     for url in (main_url, fallback_url):
@@ -99,12 +147,14 @@ async def parse_qrcode(qr_code: str, *, main_url: str, fallback_url: str) -> str
             # 200+HTML（网关劫持页/反代错误页）：按该域名失败继续试备域
             # （与非 200 同语义），不能让 JSONDecodeError 逃出 SaltApiError 语义
             continue
-        if data.get("errorID") == 0:
+        if data.get("errorID", 0) == 0:
             user_id = data.get("userID")
             # errorID=0 但缺 userID（网关异常响应）：按业务失败返回 None，
             # 不能 str(None) 绑成 "None" 字符串落库
             return str(user_id) if user_id is not None else None
-        return None
+        # 业务拒绝：200+非 0 errorID（一次性二维码已用/过期等）。备用域名
+        # 结果相同，直接抛出终止回退
+        raise SaltApiBusinessError(_business_error_message(data))
     raise SaltApiError("二维码解析服务暂不可用，请稍后再试")
 
 
@@ -118,6 +168,10 @@ async def fetch_score_payload(
     """拉取微信成绩明细，返回平铺后的 userMusicDetailList。
 
     ``qrcode`` 传入时为全量拉取（带当日游玩记录），否则为常规拉取。
+    ⚠️ 传 ``qrcode`` 时 ``/updateUser`` 会**消费这枚二维码**（一次性凭证）；
+    业务拒绝（errorID != 0，如二维码已使用/过期/账号不匹配）抛
+    :class:`SaltApiBusinessError`——此前会被静默当成空成绩列表，用户只看到
+    「导了 0 条」而不知失败原因。
     """
     payload: dict[str, str] = {"userId": userid, "importToken": ""}
     if qrcode:
@@ -138,6 +192,11 @@ async def fetch_score_payload(
             # 不再试备域——此类页面经同一反代/出口，主备同现，逐域重试只会
             # 叠加 run_update 的退避轮次白跑
             raise SaltApiError("成绩拉取响应非 JSON（网关异常），请稍后再试") from e
+        # 业务拒绝：200 + 非 0 errorID + error 文案（awmc-wahlap-api 契约）。
+        # 一次性凭证下重试/回退备域都改不了结果，直接抛业务异常（run_update
+        # 对 SaltApiBusinessError 不重试）
+        if raw.get("errorID", 0) != 0:
+            raise SaltApiBusinessError(_business_error_message(raw))
         return [
             music
             for entry in raw.get("userMusicList", [])
