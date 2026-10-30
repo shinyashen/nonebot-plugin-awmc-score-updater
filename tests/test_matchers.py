@@ -1154,7 +1154,7 @@ async def test_build_targets_df_credential_kinds(monkeypatch):
 
     # 仅 QQ（Hoshino 迁移行，service=lxns 场景同构）：无凭据无授权 → 不装
     targets, note = _build_targets(
-        UserBinding(platform="OneBot V11", user_id="449099602", service="lxns")
+        UserBinding(platform="OneBot V11", user_id="123456789", service="lxns")
     )
     assert [kw["name"] for _, _, kw in targets] == []
     assert note is None
