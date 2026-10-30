@@ -855,6 +855,15 @@ wheels = [
 ]
 
 [[package]]
+name = "lark"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/34/28fff3ab31ccff1fd4f6c7c7b0ceb2b6968d8ea4950663eadcb5720591a0/lark-1.3.1.tar.gz", hash = "sha256:b426a7a6d6d53189d318f2b6236ab5d6429eaf09259f1ca33eb716eed10d2905", size = 382732, upload-time = "2025-10-27T18:25:56.653Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/3d/14ce75ef66813643812f3093ab17e46d3a206942ce7376d31ec2d36229e7/lark-1.3.1-py3-none-any.whl", hash = "sha256:c629b661023a014c37da873b4ff58a817398d12635d3bbb2c5a03be7fe5d1e12", size = 113151, upload-time = "2025-10-27T18:25:54.882Z" },
+]
+
+[[package]]
 name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1099,7 +1108,7 @@ wheels = [
 
 [[package]]
 name = "maimai-py"
-version = "1.6.0rc2"
+version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiocache" },
@@ -1111,9 +1120,9 @@ dependencies = [
     { name = "maimai-ffi" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d9/db/b96362009fad46c73c6dafe942941aa5af05f8b8769a0d9cf42d048aa4bd/maimai_py-1.6.0rc2.tar.gz", hash = "sha256:e4a973b3e90bab9470389a44cfcf48d214d72f0fdf2ca24dce32039e6056bf2f", size = 308345, upload-time = "2026-09-29T06:03:56.627Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/47/31cb3cec8ef4e468225f5f31a3586a91e9d4d4df20db7ebc9421b4553540/maimai_py-1.6.0.tar.gz", hash = "sha256:dcaffa3f3c57da35c009fb662078e4f5b06e3912996cdad9f4100a6e22008cbc", size = 308316, upload-time = "2026-10-03T14:37:44.768Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/7f/e4f387f25a5467ab8220eff511e9a8deb0c88691fa7061f3943e91e1322c/maimai_py-1.6.0rc2-py3-none-any.whl", hash = "sha256:892f8bc3b7cdc9a8f33623948d331ec0d87284a76005244d6f1f60e18be52cff", size = 320517, upload-time = "2026-09-29T06:03:57.822Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/5c/6f286926dff109c2c84d7416c5740eebda25386d000d3ba6850a06dd5dcf/maimai_py-1.6.0-py3-none-any.whl", hash = "sha256:ce47b5c944d615f97ccb6b8a941ca92737afa9cb2e44ff4f12e5fa36b48022f3", size = 320480, upload-time = "2026-10-03T14:37:46.29Z" },
 ]
 
 [[package]]
@@ -1460,6 +1469,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "beautifulsoup4" },
     { name = "httpx" },
+    { name = "lark" },
     { name = "maimai-py" },
     { name = "nonebot-plugin-alconna" },
     { name = "nonebot-plugin-apscheduler" },
@@ -1479,7 +1489,8 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
-    { name = "maimai-py", specifier = ">=1.6.0rc2" },
+    { name = "lark", specifier = ">=1.3.1" },
+    { name = "maimai-py", specifier = ">=1.6.0" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.60.0,<1.0.0" },
     { name = "nonebot-plugin-apscheduler", specifier = ">=0.5.0,<1.0.0" },
     { name = "nonebot-plugin-localstore", specifier = ">=0.7.4,<1.0.0" },
@@ -1558,7 +1569,7 @@ test = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
-    { name = "maimai-py", specifier = ">=1.6.0rc2" },
+    { name = "maimai-py", specifier = ">=1.6.0" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.60.0,<1.0.0" },
     { name = "nonebot-plugin-awmc-helper", editable = "../nonebot-plugin-awmc-helper" },
     { name = "nonebot-plugin-localstore", specifier = ">=0.7.4,<1.0.0" },
