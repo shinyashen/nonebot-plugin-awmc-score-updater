@@ -99,7 +99,7 @@ def test_join_rev_takes_conservative_base():
 
 
 def test_join_rev_does_not_mutate_input():
-    """_join_rev 以 replace 起底真拷贝（L-10）：交集首站条目还在 target_dicts
+    """_join_rev 以 replace 起底真拷贝：交集首站条目还在 target_dicts
     里随返回值交 pc 观测作该站基线，原地 min/max 化会把基线污染成假值
     （机台真值对比假基线误判虚增 +1）。"""
     from nonebot_plugin_awmc_score_updater.updater import _join_rev
@@ -540,7 +540,7 @@ async def test_delta_chain_no_gain_skips_even_with_fc_gap(songs):
 
 async def test_delta_chain_prefilter_allowed_ids(songs):
     """落雪预过滤（target kwargs.allowed_ids）：其曲库没有的曲目（如已删除
-    限时宴谱）剔除上传并计入 skipped，其余照传（Q44/#60 盲区回归）。"""
+    限时宴谱）剔除上传并计入 skipped，其余照传（maimai.py #60 盲区回归）。"""
     from nonebot_plugin_awmc_score_updater.updater import delta_updates_chain
 
     client = await _make_client()
@@ -866,7 +866,7 @@ async def test_delta_chain_invalid_json_retry_narrowed_to_failed_targets(songs):
 async def test_delta_chain_retry_target_skipped_by_allowed_ids_keeps_first_failure(
     songs,
 ):
-    """降级重传两轮结果按目标名对位（2026-10-04 追加轮审查修复）：
+    """降级重传两轮结果按目标名对位回填（2026-10-04 修复）：
 
     双目标同轮 InvalidJsonError + 其中一站（落雪，allowed_ids={624}）的重传
     批被过滤为空 → 该站缺席重传轮。修复前按位置对位（重传轮沿 target 序

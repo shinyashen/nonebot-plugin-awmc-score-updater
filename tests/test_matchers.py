@@ -704,7 +704,7 @@ async def test_lxns_401_refresh_then_retry(app: App, stores, monkeypatch):
             bot=bot,
         )
     assert len(refresh_calls) == 1
-    assert sleeps == [5]  # 续期后 5s 退避重试（落雪新令牌生效延迟，Q43）
+    assert sleeps == [5]  # 续期后 5s 退避重试（落雪新令牌生效延迟）
     assert calls == [["水鱼", "落雪"], ["水鱼", "落雪"]]
 
 
@@ -777,7 +777,8 @@ async def test_lxns_baseline_dead_partial_message(app: App, stores, monkeypatch)
 
 
 async def test_help_forward_then_guide_image(app: App, stores, monkeypatch):
-    """OneBot 合并转发（M10「导分」指南页：4 文本节点 + 水鱼步骤独立纯图节点）。"""
+    """OneBot 合并转发（主插件帮助注册表「导分」指南页：4 文本节点 +
+    水鱼步骤独立纯图节点）。"""
     from fake import fake_private_message_event_v11
     from nonebot_plugin_awmc_helper.core.help import (
         GuidePage,
@@ -864,7 +865,7 @@ async def test_help_fallback_two_images(app: App, stores, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_with_refresh_ladder_and_copies(monkeypatch):
-    """续期成功后 5s/10s 两级退避阶梯（Q43）：成功路径、全败兜底文案、
+    """续期成功后 5s/10s 两级退避阶梯（新令牌生效延迟）：成功路径、全败兜底文案、
     dead 重绑文案、skip 原样上抛（如水鱼 Import-Token 失效）。"""
     import asyncio
 
@@ -1212,7 +1213,7 @@ async def test_qq_only_binding_rejected(app: App, stores):
 
 
 async def test_update_cmd_empty_targets_generic_hint(app: App, stores):
-    """空目标且无落雪提示 → 通用引导而非误导兜底（L-21）：
+    """空目标且无落雪提示 → 通用引导而非误导兜底：
 
     OAuth 标志在但 subject 派生不出（部署未配水鱼 OAuth 应用，external_id
     换不来摘要）且无 Import-Token——此前漏过空目标判定，落进 run_update 的
@@ -1358,7 +1359,7 @@ async def test_partial_failure_plain_reply(app: App, stores, monkeypatch):
 
 @respx.mock
 async def test_update_cmd_rate_limit_whole_chain_reply(app: App, stores, monkeypatch):
-    """整链失败映射收口回归（L-13/T-13）：纯水鱼配额用尽（RateLimitError 整链
+    """整链失败映射收口回归：纯水鱼配额用尽（RateLimitError 整链
     上抛，异常带链内归属标签）→ 用户收到配额文案——修复前整链 except 漏
     RateLimitError，落 handle_errors 的通用「出错了」，而「配额用尽」只在
     部分失败态可达。"""
@@ -2122,7 +2123,7 @@ async def test_pc_list_at_trailing_space_target_unbound(app: App, stores):
 
 @pytest.mark.asyncio
 async def test_wechat_bind_concurrent_first_bind(monkeypatch):
-    """并发首绑双 INSERT 竞态（复审补，镜像主插件 binding.ensure 同款测试）：
+    """并发首绑双 INSERT 竞态（镜像主插件 binding.ensure 同款测试）：
     后 commit 方撞复合主键 → 捕 IntegrityError 重读后覆盖更新，两协程都
     成功且库里恰好一行。"""
     import asyncio

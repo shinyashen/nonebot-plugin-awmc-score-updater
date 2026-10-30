@@ -139,7 +139,7 @@ async def test_parse_qrcode_all_down():
 @respx.mock
 async def test_parse_qrcode_html_body_falls_back():
     """200+HTML（网关劫持页）→ JSONDecodeError 不逃出 SaltApiError 语义，
-    按该域名失败继续试备域（L-17）。"""
+    按该域名失败继续试备域。"""
     from nonebot_plugin_awmc_score_updater.saltapi import parse_qrcode
 
     respx.post(f"{MAIN}/getQRInfo").mock(
@@ -154,7 +154,7 @@ async def test_parse_qrcode_html_body_falls_back():
 @respx.mock
 async def test_fetch_score_payload_html_body_raises_saltapi_error():
     """200+HTML → 立即抛 SaltApiError（计入失败、不试备域），JSONDecodeError
-    不再白跑 run_update 的 3 轮退避后落通用兜底（L-17）。"""
+    不再白跑 run_update 的 3 轮退避后落通用兜底。"""
     from nonebot_plugin_awmc_score_updater.saltapi import (
         SaltApiError,
         fetch_score_payload,

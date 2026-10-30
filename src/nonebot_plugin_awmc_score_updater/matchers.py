@@ -103,7 +103,7 @@ _PC_UNCALIBRATED_HINT = (
     " 提示：尚未扫码校准，次数为导分增量估算；带二维码私聊「导」一次可校准"
 )
 
-# 落雪续期退避阶梯（秒，Q43 新令牌生效延迟）：5s/10s 两级，末档触发慢查询提示
+# 落雪续期退避阶梯（秒，新令牌生效有延迟）：5s/10s 两级，末档触发慢查询提示
 _LXNS_RETRY_LADDER = (5, 10)
 
 _LXNS_REBIND_HINT = (
@@ -290,8 +290,8 @@ async def _run_with_refresh(
     refresh_token 续期落库后重试（不限主插件 service 语义）。返回 (用时秒,
     跳过条数, 落雪只读提示, 目标名列表, 部分失败目标列表)。
 
-    落雪续期两条入口汇入同一阶梯（_LXNS_RETRY_LADDER 退避，Q43 新令牌生效
-    延迟）：
+    落雪续期两条入口汇入同一阶梯（_LXNS_RETRY_LADDER 退避，新令牌生效
+    有延迟）：
     - 整链失败（run_update 上抛：全部目标失败/源失败）且归属落雪——续期后
       重试，耗尽抛 ImportFailed「暂时未能同步」（handler 映射为整链文案）；
     - 部分失败（他站成功、落雪 401 进失败列表）——同样续期重试，耗尽后
@@ -301,7 +301,7 @@ async def _run_with_refresh(
     部分失败原样保留（如水鱼 Import-Token 失效文案本就准确）。
     """
 
-    # 落雪 token 过期预检（Q43）：导分前 JWT exp 已过/临近就先续期，省掉
+    # 落雪 token 过期预检：导分前 JWT exp 已过/临近就先续期，省掉
     # 写端点上的必败 401 首跳；best-effort，失败走下方 401 驱动链路
     await binding_service.preflight_lxns(binding)
 
@@ -538,7 +538,7 @@ async def _(
             RateLimitError,
             InvalidDeveloperTokenError,
         ) as exc:
-            # 整链失败与部分失败共用 _failure_hint 单一映射（T-13，防两套文案
+            # 整链失败与部分失败共用 _failure_hint 单一映射（防两套文案
             # 漂移）；目标名读链内挂的归属标签（FAIL_TARGET_ATTR），无标签
             # （理论不可达，run_update 直抛等）退回中性「数据站」
             name = getattr(exc, FAIL_TARGET_ATTR, None) or "数据站"
@@ -580,7 +580,7 @@ async def _(
 @help_cmd.handle()
 @handle_errors()
 async def _(bot: Bot, session: Session = UniSession()):
-    # OneBot v11 合并转发（M10「导分」指南页）；失败或其他适配器降级为
+    # OneBot v11 合并转发（主插件帮助注册表「导分」指南页）；失败或其他适配器降级为
     # 文字渲染图片（纯文本字数过多）
     page = GuidePage(guide=help_registry.guides["导分"])
     entries = page_entries(help_registry, page)
@@ -718,7 +718,7 @@ async def _(
 
 
 # ---------------------------------------------------------------- 帮助声明
-# 指令按功能就近入主插件类别（M10 拍板⑦）：绑定微信→绑定、pc 排行→查分、
+# 指令按功能就近入主插件类别（同一插件可就近入多个类别）：绑定微信→绑定、pc 排行→查分、
 # 导→工具；「导分」指南为流程轴首个真实消费者
 
 _SU_PLUGIN = "nonebot_plugin_awmc_score_updater"

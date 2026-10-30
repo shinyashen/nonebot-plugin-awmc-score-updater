@@ -188,7 +188,7 @@ async def test_pc_bridge_no_phantom_on_intersect_min(pc_store):
 
     机台真值 99.5 与水鱼一致并非新游玩，桥接不得 +1——_join_rev 原地改写曾
     把随返回值交出的水鱼基线拉低成 min 99.0，误判虚增。同时断言返回基线
-    == 各站原始值（L-10）。"""
+    == 各站原始值。"""
     from test_updater import FakeUpdateProvider, mk_score, _make_client
     from maimai_py.models import PlayerIdentifier
 
