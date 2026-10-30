@@ -588,7 +588,7 @@ async def run_update(
                 try:
                     await pc_hook(source_scores, target_dicts)
                 except Exception:
-                    logger.warning("游玩次数观测失败（不影响本次导分）")
+                    logger.warning("游玩次数观测失败（不影响本次导分）", exc_info=True)
             return time.monotonic() - start, skipped, failures
         except SaltApiBusinessError:
             # 二维码业务拒绝（无效/已用/过期/账号不匹配）：重试无益，且可能

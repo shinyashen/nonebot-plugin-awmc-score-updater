@@ -222,6 +222,9 @@ async def _hint_if_uncalibrated(wb, *, page: int = 1) -> None:
         await UniMessage.text(_PC_UNCALIBRATED_HINT).send(at_sender=True)
 
 
+_QR_FORMAT_ERROR = "请提供正确格式的内容(SGWCMAID.../https...)！"
+
+
 async def _resolve_qrcode(text: str) -> tuple[str, str]:
     """解析二维码参数 → (二维码内容, 华立 userID)，业务失败抛 SaltApiError 子类文案。
 
@@ -233,7 +236,7 @@ async def _resolve_qrcode(text: str) -> tuple[str, str]:
     """
     qr = extract_qrcode(text)
     if qr is None:
-        raise SaltApiError("请提供正确格式的内容(SGWCMAID.../https...)！")
+        raise SaltApiError(_QR_FORMAT_ERROR)
     arcade_user_id = await parse_qrcode(
         qr,
         main_url=plugin_config.awmc_su_salt_api_url,
@@ -388,6 +391,11 @@ async def _run_with_refresh(
         try:
             result = await attempt()
         except InvalidPlayerIdentifierError as exc:
+            # 与首跳入口同款归属守卫：阶梯内水鱼凭据失效等非落雪异常
+            # 不进阶梯白等退避，更不能耗尽后误报成「落雪数据暂时未能同步」
+            fail_name = getattr(exc, FAIL_TARGET_ATTR, None)
+            if fail_name is not None and fail_name != _TARGET_LX:
+                raise
             last = exc
             continue
         if lx_auth_failure(result[4]) is None:
@@ -480,7 +488,7 @@ async def _(
             # errorID=91（SaltApiBusinessError），在导分失败时展示明确文案。
             qrcode = extract_qrcode(qr_input)
             if qrcode is None:
-                raise SaltApiError("请提供正确格式的内容(SGWCMAID.../https...)！")
+                raise SaltApiError(_QR_FORMAT_ERROR)
 
         if wb.last_update:
             hint = (
@@ -633,7 +641,7 @@ async def _(
     ds_raw, page_raw = groups
     page = parse_page(page_raw)
 
-    binding, _, wb, pc_map = await _resolve_pc_context(session, event)
+    binding, who, wb, pc_map = await _resolve_pc_context(session, event)
     scores = await score_service.get_scores_all(binding, notify_slow=slow_notice())
 
     # 分数前缀同主插件分数列表口径：带小数点=定数，否则=标级；
@@ -646,7 +654,7 @@ async def _(
         matched = [s for s in scores.scores if s.level == ds_raw]
     matched = [s for s in matched if pc_key(s) in pc_map]
     if not matched:
-        await UniMessage.text(" 没有找到符合条件的成绩").finish(at_sender=True)
+        await UniMessage.text(f"没有找到{who}符合条件的成绩").finish(at_sender=True)
 
     def pc_of(s) -> int:
         return pc_map[pc_key(s)]
