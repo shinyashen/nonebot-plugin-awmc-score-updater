@@ -121,6 +121,26 @@ def extract_qrcode(text: str) -> str | None:
     return None
 
 
+async def _iter_post(
+    path: str,
+    payload: dict[str, str],
+    *,
+    main_url: str,
+    fallback_url: str,
+):
+    """主备域名逐域 POST 的传输骨架：网络失败跳备域，逐个产出响应。
+
+    非 200/业务拒绝/JSON 形态的处置两链路刻意不同（见 parse_qrcode 与
+    fetch_score_payload 各自注释），全部域名失败时循环自然结束。
+    """
+    for url in (main_url, fallback_url):
+        try:
+            resp = await get_client().post(f"{url}{path}", json=payload)
+        except httpx.RequestError:
+            continue
+        yield resp
+
+
 async def parse_qrcode(qr_code: str, *, main_url: str, fallback_url: str) -> str | None:
     """调 ``/getQRInfo`` 解析二维码，成功返回华立 userID（字符串）。
 
@@ -134,11 +154,9 @@ async def parse_qrcode(qr_code: str, *, main_url: str, fallback_url: str) -> str
     返回 None（网关异常响应，不能 ``str(None)`` 绑成 "None" 字符串落库）。
     """
     payload = {"qrCode": qr_code}
-    for url in (main_url, fallback_url):
-        try:
-            resp = await get_client().post(f"{url}/getQRInfo", json=payload)
-        except httpx.RequestError:
-            continue
+    async for resp in _iter_post(
+        "/getQRInfo", payload, main_url=main_url, fallback_url=fallback_url
+    ):
         if resp.status_code != 200:
             continue
         try:
@@ -177,11 +195,9 @@ async def fetch_score_payload(
     if qrcode:
         payload["qrCode"] = qrcode
     last_status = 0
-    for url in (main_url, fallback_url):
-        try:
-            resp = await get_client().post(f"{url}/updateUser", json=payload)
-        except httpx.RequestError:
-            continue
+    async for resp in _iter_post(
+        "/updateUser", payload, main_url=main_url, fallback_url=fallback_url
+    ):
         if resp.status_code != 200:
             last_status = resp.status_code
             continue
