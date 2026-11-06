@@ -2153,3 +2153,32 @@ async def test_wechat_bind_concurrent_first_bind(monkeypatch):
     row = await wechat_store.get(platform, user_id)
     assert row is not None
     assert row.arcade_user_id in ("user-a", "user-b")  # 胜者行 + 竞态败方覆盖写入
+
+
+@pytest.mark.asyncio
+async def test_failure_hint_access_denied():
+    """导分失败的数据站拒绝访问文案由主插件 access_denied_hint 单源给出：
+
+    「未同意用户协议」与「隐私限制」处置不同（前者本人去网页同意协议，后者
+    改隐私开关），按目标站分开给；曾在此一律报「未同意用户协议」。
+    """
+    from maimai_py.exceptions import PrivacyLimitationError
+    from nonebot_plugin_awmc_helper.constants import SERVICE_LXNS, SERVICE_DIVINGFISH
+    from nonebot_plugin_awmc_helper.core.score import access_denied_hint
+
+    from nonebot_plugin_awmc_score_updater import matchers
+
+    agreement = PrivacyLimitationError("该用户未同意用户协议")  # 水鱼实测原话
+    privacy = PrivacyLimitationError("该玩家已设置隐私")
+
+    df_agreement = matchers._failure_hint(matchers._TARGET_DF, agreement)
+    assert df_agreement == access_denied_hint(agreement, SERVICE_DIVINGFISH)
+    assert "用户协议" in df_agreement
+
+    df_privacy = matchers._failure_hint(matchers._TARGET_DF, privacy)
+    assert df_privacy == access_denied_hint(privacy, SERVICE_DIVINGFISH)
+    assert "用户协议" not in df_privacy  # 隐私限制不再被说成没同意协议
+
+    lx_privacy = matchers._failure_hint(matchers._TARGET_LX, privacy)
+    assert lx_privacy == access_denied_hint(privacy, SERVICE_LXNS)
+    assert "落雪" in lx_privacy

@@ -28,7 +28,11 @@ from maimai_py.exceptions import (
 from nonebot_plugin_uninfo import Session, SceneType, UniSession
 from maimai_py.providers.base import IScoreUpdateProvider
 from nonebot_plugin_alconna.uniseg import UniMessage
-from nonebot_plugin_awmc_helper.constants import DEFAULT_THEME
+from nonebot_plugin_awmc_helper.constants import (
+    SERVICE_LXNS,
+    DEFAULT_THEME,
+    SERVICE_DIVINGFISH,
+)
 from nonebot_plugin_awmc_helper.core.calc import level_value_match
 from nonebot_plugin_awmc_helper.core.help import (
     Guide,
@@ -43,6 +47,7 @@ from nonebot_plugin_awmc_helper.core.score import (
     UserScoreError,
     build_bests,
     score_service,
+    access_denied_hint,
 )
 from nonebot_plugin_awmc_helper.core.utils import (
     parse_page,
@@ -94,6 +99,8 @@ pc50_cmd = on_command("pc50", aliases={"PC50"}, block=True)
 # 文案句子内嵌的「水鱼/落雪」字样是完整句子而非目标名比较，不引此常量
 _TARGET_DF = "水鱼"
 _TARGET_LX = "落雪"
+_TARGET_SERVICE = {_TARGET_DF: SERVICE_DIVINGFISH, _TARGET_LX: SERVICE_LXNS}
+"""目标显示名 → 主插件数据源键（拒绝访问文案按站给出，见 _failure_hint）。"""
 
 # pc 指令（pc列表/pc50）共用文案：前置检查收敛于 _resolve_pc_context，
 # 收尾兜底（pc50 全零行）与校准提示小助手亦引用
@@ -267,8 +274,10 @@ def _failure_hint(name: str, exc: Exception) -> str:
         # 1.6.0 起 dev 端点已从库中删除，此异常只剩 OAuth 应用凭据缺失/无效
         # 一类部署问题（文案与主插件 core.score 同口径）
         return "水鱼 OAuth 应用凭据无效或缺失，请联系管理员检查部署配置"
-    if isinstance(exc, PrivacyLimitationError):
-        return f"未同意{name}的相关用户协议，无法完成该操作"
+    if (hint := access_denied_hint(exc, _TARGET_SERVICE.get(name))) is not None:
+        # 数据站拒绝访问：「未同意用户协议」与「隐私限制」处置不同、库层不分类，
+        # 分类与文案由主插件单源给出（曾在此一律报「未同意用户协议」）
+        return hint
     if isinstance(exc, InvalidJsonError):
         return f"{name}服务暂时不可用（可能维护中），请稍后再试"
     if isinstance(exc, RateLimitError):
